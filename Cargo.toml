@@ -2,8 +2,33 @@
 name = "vsftui"
 version = "0.1.0"
 edition = "2024"
-authors = ["VSFTUI Contributors"]
+authors = ["rahmatardianto"]
 description = "Terminal UI for SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync"
+license = "NOASSERTION"
+repository = "https://github.com/gomppm/vsftui"
+
+[features]
+default = []
+vendored = [
+    "ssh2/vendored-openssl",
+    "git2/vendored-libgit2",
+    "git2/vendored-openssl",
+]
+
+[package.metadata.deb]
+maintainer = "rahmatardianto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/vsftui", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/vsftui/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/vsftui", dest = "/usr/bin/vsftui", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/vsftui/README.md", mode = "644" },
+]
 
 [dependencies]
 # Async Runtime
@@ -46,4 +71,8 @@ json5 = "1.3.7"
 
 [dev-dependencies]
 tempfile = "3.27"
+
+[profile.release]
+lto = "thin"
+strip = true
 

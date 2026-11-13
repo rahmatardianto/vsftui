@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run unit tests
+        run: cargo test --locked
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch_pkg_arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch_pkg_arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross and packaging tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross,cargo-deb,cargo-generate-rpm
+
+      - name: Build static binary
+        run: cross build --release --locked --target ${{ matrix.target }} --features vendored
+
+      - name: Package .tar.gz, .deb, and .rpm
+        shell: bash
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          fi
+
+          # Universal static tarball (works on all Linux distributions)
+          STAGE="vsftui-${VERSION}-${{ matrix.target }}"
+          mkdir -p "${STAGE}"
+          cp "target/${{ matrix.target }}/release/vsftui" "${STAGE}/"
+          cp README.md "${STAGE}/"
+          tar -czf "dist/${STAGE}.tar.gz" "${STAGE}"
+
+          # Debian / Ubuntu package (.deb)
+          cargo deb --no-build --no-strip --target ${{ matrix.target }} -o dist/
+
+          # Fedora / RHEL / openSUSE package (.rpm)
+          cargo generate-rpm --target ${{ matrix.target }} -o dist/
+
+      - name: Package Arch Linux (.pkg.tar.zst)
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          fi
+          PKGVER="${VERSION//-/_}"
+
+          mkdir -p arch-pkg
+          cp "target/${{ matrix.target }}/release/vsftui" arch-pkg/vsftui
+          cp README.md arch-pkg/README.md
+
+          printf '%s\n' \
+            "pkgname=vsftui" \
+            "pkgver=${PKGVER}" \
+            "pkgrel=1" \
+            'pkgdesc="Terminal UI for SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync"' \
+            "arch=('x86_64' 'aarch64')" \
+            'url="https://github.com/gomppm/vsftui"' \
+            "license=('custom')" \
+            "provides=('vsftui')" \
+            "conflicts=('vsftui')" \
+            "options=('!strip' '!debug')" \
+            "package() {" \
+            '  install -Dm755 "$startdir/vsftui" "$pkgdir/usr/bin/vsftui"' \
+            '  install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/vsftui/README.md"' \
+            "}" > arch-pkg/PKGBUILD
+
+          docker run --rm \
+            -v "$PWD/arch-pkg:/pkg" \
+            -v "$PWD/dist:/dist" \
+            archlinux:base-devel \
+            bash -euo pipefail -c '
+              useradd -m builder
+              chown -R builder:builder /pkg /dist
+              cp /etc/makepkg.conf /tmp/makepkg.conf
+              sed -i "s/^CARCH=.*/CARCH=\"${{ matrix.arch_pkg_arch }}\"/" /tmp/makepkg.conf
+              su builder -c "cd /pkg && PKGEXT=.pkg.tar.zst PKGDEST=/dist makepkg -d --noconfirm --config /tmp/makepkg.conf"
+            '
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
