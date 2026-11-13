@@ -60,7 +60,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let header_line = Line::from(vec![
-        Span::styled("⚡ SFTUI ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled("⚡ VSFTUI ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         profile_badge,
         protocol_badge,
         status_badge,
@@ -535,7 +535,7 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
             frame.render_widget(Clear, area);
 
             let help_text = vec![
-                Line::from(Span::styled("⚡ SFTUI Keybindings Guide", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled("⚡ VSFTUI Keybindings Guide", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
                 Line::from(""),
                 Line::from(vec![Span::styled("Tab       ", Style::default().fg(Color::Cyan)), Span::raw("Cycle active pane (Left -> Right -> Bottom)")]),
                 Line::from(vec![Span::styled("1, 2      ", Style::default().fg(Color::Cyan)), Span::raw("Switch tabs in current pane")]),

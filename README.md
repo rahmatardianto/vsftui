@@ -1,121 +1,121 @@
-# ⚡ SFTUI: High-Performance Rust SFTP/FTP TUI with Git Uncommitted Auto-Sync
+# ⚡ VSFTUI: High-Performance Rust SFTP/FTP TUI with Git Uncommitted Auto-Sync
 
-`sftui` adalah Terminal User Interface (TUI) modern berbasis **Rust** yang dirancang sebagai pengganti tangguh dan *drop-in compatible* untuk ekstensi Visual Studio Code `Natizyskunk/vscode-sftp` (dan fork aslinya `liximomo/vscode-sftp`), dilengkapi fitur unggulan **Git Uncommitted Auto-Sync**.
+`vsftui` is a modern Terminal User Interface (TUI) built in **Rust**, designed as a robust, *drop-in compatible* replacement for the Visual Studio Code extension `Natizyskunk/vscode-sftp` (and its original fork `liximomo/vscode-sftp`), featuring first-class **Git Uncommitted Auto-Sync**.
 
 ---
 
-## 🌟 Fitur Utama
+## 🌟 Key Features
 
-1. **Drop-in Compatibility `.vscode/sftp.json` (JSONC & JSON5)**:
-   - Mendukung komentar `//`, `/* */`, dan *trailing comma*.
-   - Mendukung format Single Config, Multi-Config Array, serta Named Profiles (`"profiles": { "dev": {...}, "prod": {...} }`).
-   - Ekspansi otomatis environment variable (`$SSH_AUTH_SOCK`, `$HOME`, dan tilde `~`).
-   - Mendukung koneksi SFTP (SSH key/passphrase, agent, password) dan FTP murni.
-   - Mendukung SSH Jump Host / Bastion Proxy Hopping (`hop`).
+1. **Drop-in `.vscode/sftp.json` Compatibility (JSONC & JSON5)**:
+   - Supports `//` and `/* */` comments as well as *trailing commas*.
+   - Supports Single Config, Multi-Config Array, and Named Profiles (`"profiles": { "dev": {...}, "prod": {...} }`).
+   - Automatic environment variable expansion (`$SSH_AUTH_SOCK`, `$HOME`, and tilde `~`).
+   - Supports SFTP (SSH key/passphrase, agent, password) and plain FTP connections.
+   - Supports SSH Jump Host / Bastion Proxy Hopping (`hop`).
 2. **First-Class Git Uncommitted Auto-Sync**:
-   - Mendeteksi perubahan file lokal yang belum di-commit secara real-time via `git2` (*libgit2*).
-   - Menandai status file: `[M]` (Modified), `[A]` (Staged New), `[??]` (Untracked), `[D]` (Deleted), `[R]` (Renamed).
-   - Mode Batch Sync (`Shift+G` di TUI atau `--sync-uncommitted` via CLI).
-   - Mode Continuous Watch Auto-Sync (`g` toggle di TUI atau `--watch-git` via CLI) dengan *debouncing* otomatis.
-   - Sinkronisasi otomatis saat file di-revert/restore (`git restore <file>` / `git checkout -- <file>`) untuk menjaga integritas remote server.
-3. **Arsitektur Asinkron Zero-Blocking (Tokio + Dedicated SFTP Worker)**:
-   - Operasi I/O jaringan, SSH handshake, dan pembacaan direktori berjalan di worker terisolasi. UI thread `ratatui` tidak pernah *freeze* atau *stutter*.
-   - Queue transfer paralel (*Conveyer*) dengan kontrol konkurensi (`tokio::sync::Semaphore`), pelaporan kecepatan transfer (KB/s, MB/s), retry otomatis dengan *exponential backoff*.
-   - Transfer atomik: jika `"useTempFile": true`, file diunggah ke `<remote>.part` terlebih dahulu dan di-rename secara atomik setelah selesai.
-4. **Keamanan Kredensial**:
-   - Password dan passphrase tidak pernah disimpan dalam plaintext log.
-   - Dukungan SSH Agent (`$SSH_AUTH_SOCK`) dan modal password interaktif bertopeng (`*`).
+   - Detects uncommitted local file changes in real time via `git2` (*libgit2*).
+   - Marks file statuses: `[M]` (Modified), `[A]` (Staged New), `[??]` (Untracked), `[D]` (Deleted), `[R]` (Renamed).
+   - Batch Sync mode (`Shift+G` in TUI or `--sync-uncommitted` via CLI).
+   - Continuous Watch Auto-Sync mode (`g` toggle in TUI or `--watch-git` via CLI) with automatic *debouncing*.
+   - Automatically syncs reverted/restored files (`git restore <file>` / `git checkout -- <file>`) to maintain remote server integrity.
+3. **Zero-Blocking Asynchronous Architecture (Tokio + Dedicated SFTP Worker)**:
+   - Network I/O, SSH handshakes, and directory listings run on isolated workers. The `ratatui` UI thread never *freezes* or *stutters*.
+   - Parallel transfer queue (*Conveyer*) with concurrency control (`tokio::sync::Semaphore`), transfer speed reporting (KB/s, MB/s), and automatic retries with *exponential backoff*.
+   - Atomic transfers: when `"useTempFile": true`, files are uploaded to `<remote>.part` first and atomically renamed upon completion.
+4. **Credential Security**:
+   - Passwords and passphrases are never stored in plaintext logs.
+   - Supports SSH Agent (`$SSH_AUTH_SOCK`) and a masked (`*`) interactive password prompt modal.
 
 ---
 
-## 📂 Struktur Proyek
+## 📂 Project Structure
 
 ```text
-sftui/
-├── Cargo.toml                  # Manifest dependensi & pin versi
-├── README.md                   # Dokumentasi lengkap & panduan penggunaan
+vsftui/
+├── Cargo.toml                  # Dependency manifest & version pins
+├── README.md                   # Complete documentation & usage guide
 ├── .vscode/
-│   └── sftp.json              # Contoh konfigurasi kompatibel dengan vscode-sftp
+│   └── sftp.json               # Example vscode-sftp compatible configuration
 └── src/
     ├── main.rs                 # CLI entry point (clap), signal handling & TUI bootstrap
-    ├── app.rs                  # State machine aplikasi, event dispatcher, tabs & modals
-    ├── config.rs               # Parser JSONC/JSON5 sftp.json, resolver profile & globs
-    ├── git_sync.rs             # Engine pemeriksa status Git working tree & index
-    ├── watcher.rs              # Filesystem debounced watcher (notify-debouncer-mini)
+    ├── app.rs                  # Application state machine, event dispatcher, tabs & modals
+    ├── config.rs               # JSONC/JSON5 sftp.json parser, profile resolver & globs
+    ├── git_sync.rs             # Git working tree & index status inspection engine
+    ├── watcher.rs              # Debounced filesystem watcher (notify-debouncer-mini)
     ├── transfer/
-    │   ├── mod.rs              # Modul transfer
-    │   ├── conveyer.rs         # Queue transfer paralel (Semaphore, retry, progress)
-    │   └── fs_provider.rs      # Abstraksi RemoteFs (SFTP via ssh2 & FTP via suppaftp)
+    │   ├── mod.rs              # Transfer module
+    │   ├── conveyer.rs         # Parallel transfer queue (Semaphore, retry, progress)
+    │   └── fs_provider.rs      # RemoteFs abstraction (SFTP via ssh2 & FTP via suppaftp)
     └── ui/
-        └── mod.rs              # Layout 4 zona responsif ratatui & modal popups
+        └── mod.rs              # Responsive 4-zone ratatui layout & modal popups
 ```
 
 ---
 
-## 🛠️ Instalasi & Kompilasi
+## 🛠️ Installation & Build
 
-Pastikan toolchain Rust (`cargo` & `rustc`) versi 1.80+ atau stabil telah terinstal (misal via `mise` atau `rustup`):
+Ensure a Rust toolchain (`cargo` & `rustc`) version 1.80+ or stable is installed (e.g. via `mise` or `rustup`):
 
 ```bash
-# Clone atau masuk ke repositori
-cd /home/arch/Projects/sftui
+# Clone or enter the repository
+cd vsftui
 
-# Jalankan pengujian unit
+# Run unit tests
 cargo test
 
-# Kompilasi rilis
+# Build release binary
 cargo build --release
 ```
 
 ---
 
-## 🚀 Panduan Penggunaan
+## 🚀 Usage Guide
 
-### 1. Mode Interaktif Terminal UI (TUI)
-Jalankan di direktori proyek yang memiliki `.vscode/sftp.json`:
+### 1. Interactive Terminal UI (TUI) Mode
+Run inside a project directory containing `.vscode/sftp.json`:
 ```bash
 cargo run
-# atau gunakan profil tertentu:
+# or specify a profile:
 cargo run -- --profile production
 ```
 
-### 2. Mode Headless: Batch Sync Perubahan Git (Sekali Jalan)
-Sangat cocok untuk script deployment cepat, pre-commit hook, atau CI/CD:
+### 2. Headless Mode: Batch Sync Git Changes (One-Shot)
+Ideal for quick deployment scripts, pre-commit hooks, or CI/CD:
 ```bash
 cargo run -- --sync-uncommitted
 ```
 
-### 3. Mode Headless: Continuous Git Watcher Daemon
-Memantau direktori kerja lokal dan secara otomatis mengunggah perubahan Git yang belum di-commit ke server:
+### 3. Headless Mode: Continuous Git Watcher Daemon
+Watches the local working directory and automatically uploads uncommitted Git changes to the server:
 ```bash
 cargo run -- --watch-git
 ```
 
 ---
 
-## ⌨️ Pintasan Tombol TUI (Keybindings)
+## ⌨️ TUI Keybindings
 
-| Tombol | Aksi |
+| Key | Action |
 | :--- | :--- |
-| `Tab` | Pindah fokus panel aktif (`Left Pane` ➔ `Right Pane` ➔ `Bottom Pane`) |
-| `1` / `2` | Beralih tab pada panel yang sedang aktif (`Git Uncommitted` / `Local Explorer`, `Queue` / `Logs`) |
-| `j` / `Down` | Geser kursor ke bawah pada daftar / tabel |
-| `k` / `Up` | Geser kursor ke atas pada daftar / tabel |
-| `Enter` | Masuk ke subdirektori / unggah file terpilih / unduh file remote terpilih |
-| `Backspace` / `-` | Kembali ke direktori induk (*parent folder*) |
-| `u` | Unggah file atau direktori lokal terpilih ke server |
-| `d` | Unduh file atau direktori remote terpilih ke lokal |
+| `Tab` | Cycle active pane focus (`Left Pane` ➔ `Right Pane` ➔ `Bottom Pane`) |
+| `1` / `2` | Switch tabs in the active pane (`Git Uncommitted` / `Local Explorer`, `Queue` / `Logs`) |
+| `j` / `Down` | Move cursor down in list / table |
+| `k` / `Up` | Move cursor up in list / table |
+| `Enter` | Enter subdirectory / upload selected local file / download selected remote file |
+| `Backspace` / `-` | Go up to parent directory |
+| `u` | Upload selected local file or directory to server |
+| `d` | Download selected remote file or directory to local |
 | `g` | Toggle Continuous Git Uncommitted Auto-Sync (`ON` / `OFF`) |
-| `G` (*Shift+G*) | Memicu Batch Sync untuk semua file uncommitted saat ini |
-| `p` | Buka modal Switcher Profil server (`sftp.json` profiles) |
-| `r` | Refresh status direktori lokal, direktori remote, dan status Git |
-| `c` | Bersihkan riwayat tugas transfer yang telah selesai dari queue |
-| `?` / `h` | Buka modal panduan bantuan (*Help*) |
-| `q` / `Ctrl+C` | Keluar dari aplikasi dengan aman (*graceful shutdown*) |
+| `G` (*Shift+G*) | Trigger Batch Sync for all current uncommitted files |
+| `p` | Open server Profile Switcher modal (`sftp.json` profiles) |
+| `r` | Refresh local directory, remote directory, and Git status |
+| `c` | Clear completed transfer tasks from the queue |
+| `?` / `h` | Open Help guide modal |
+| `q` / `Ctrl+C` | Exit application safely (*graceful shutdown*) |
 
 ---
 
-## ⚙️ Contoh Konfigurasi `.vscode/sftp.json`
+## ⚙️ Example `.vscode/sftp.json` Configuration
 
 ```jsonc
 // .vscode/sftp.json
@@ -136,7 +136,7 @@ cargo run -- --watch-git
     "**/node_modules/**",
     "**/target/**",
   ],
-  // Ekstensi Baru: Git Uncommitted Auto-Sync
+  // Extended Feature: Git Uncommitted Auto-Sync
   "gitAutoSync": {
     "enabled": true,
     "includeUntracked": true,

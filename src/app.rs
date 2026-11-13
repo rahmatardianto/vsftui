@@ -173,7 +173,7 @@ impl App {
             conveyer_event_tx,
         };
 
-        app.add_log("INFO", "SFTUI initialized. Connecting to remote...".to_string());
+        app.add_log("INFO", "VSFTUI initialized. Connecting to remote...".to_string());
         app.refresh_local_files();
         let _ = app.action_tx.send(AppAction::RefreshGitStatus);
 

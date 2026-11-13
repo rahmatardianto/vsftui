@@ -61,7 +61,7 @@ enum UiUpdate {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "sftui", author, version, about = "Terminal SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync")]
+#[command(name = "vsftui", author, version, about = "Terminal SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync")]
 struct Cli {
     /// Path to .vscode/sftp.json configuration file
     #[arg(short, long)]
@@ -127,7 +127,7 @@ async fn run_headless_sync_uncommitted(
     workspace_root: &Path,
     config: SftpConfig,
 ) -> Result<()> {
-    println!("⚡ SFTUI: Headless Git Uncommitted Batch Sync");
+    println!("⚡ VSFTUI: Headless Git Uncommitted Batch Sync");
     println!("Workspace : {}", workspace_root.display());
     println!("Target    : {}@{}:{}", config.username, config.host, config.remote_path);
 
@@ -224,7 +224,7 @@ async fn run_headless_watch_git(
     workspace_root: &Path,
     config: SftpConfig,
 ) -> Result<()> {
-    println!("⚡ SFTUI: Headless Continuous Git Auto-Sync Watcher");
+    println!("⚡ VSFTUI: Headless Continuous Git Auto-Sync Watcher");
     println!("Workspace : {}", workspace_root.display());
     println!("Target    : {}@{}:{}", config.username, config.host, config.remote_path);
 

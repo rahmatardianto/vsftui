@@ -1,8 +1,8 @@
 [package]
-name = "sftui"
+name = "vsftui"
 version = "0.1.0"
 edition = "2024"
-authors = ["SFTUI Contributors"]
+authors = ["VSFTUI Contributors"]
 description = "Terminal UI for SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync"
 
 [dependencies]
