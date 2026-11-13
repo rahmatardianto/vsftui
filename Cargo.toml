@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["rahmatardianto"]
 description = "Terminal UI for SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync"
-license = "NOASSERTION"
+license = "MIT"
 repository = "https://github.com/gomppm/vsftui"
 
 [features]
@@ -22,12 +22,14 @@ priority = "optional"
 assets = [
     ["target/release/vsftui", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/vsftui/README.md", "644"],
+    ["LICENSE", "usr/share/doc/vsftui/copyright", "644"],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/vsftui", dest = "/usr/bin/vsftui", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/vsftui/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/vsftui/LICENSE", mode = "644" },
 ]
 
 [dependencies]

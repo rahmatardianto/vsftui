@@ -67,6 +67,7 @@ jobs:
           mkdir -p "${STAGE}"
           cp "target/${{ matrix.target }}/release/vsftui" "${STAGE}/"
           cp README.md "${STAGE}/"
+          cp LICENSE "${STAGE}/"
           tar -czf "dist/${STAGE}.tar.gz" "${STAGE}"
 
           # Debian / Ubuntu package (.deb)
@@ -87,6 +88,7 @@ jobs:
           mkdir -p arch-pkg
           cp "target/${{ matrix.target }}/release/vsftui" arch-pkg/vsftui
           cp README.md arch-pkg/README.md
+          cp LICENSE arch-pkg/LICENSE
 
           printf '%s\n' \
             "pkgname=vsftui" \
@@ -95,13 +97,14 @@ jobs:
             'pkgdesc="Terminal UI for SFTP/FTP synchronization with vscode-sftp compatibility and Git uncommitted auto-sync"' \
             "arch=('x86_64' 'aarch64')" \
             'url="https://github.com/gomppm/vsftui"' \
-            "license=('custom')" \
+            "license=('MIT')" \
             "provides=('vsftui')" \
             "conflicts=('vsftui')" \
             "options=('!strip' '!debug')" \
             "package() {" \
             '  install -Dm755 "$startdir/vsftui" "$pkgdir/usr/bin/vsftui"' \
             '  install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/vsftui/README.md"' \
+            '  install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/vsftui/LICENSE"' \
             "}" > arch-pkg/PKGBUILD
 
           docker run --rm \

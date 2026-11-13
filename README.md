@@ -16,7 +16,7 @@
    - Detects uncommitted local file changes in real time via `git2` (*libgit2*).
    - Marks file statuses: `[M]` (Modified), `[A]` (Staged New), `[??]` (Untracked), `[D]` (Deleted), `[R]` (Renamed).
    - Batch Sync mode (`Shift+G` in TUI or `--sync-uncommitted` via CLI).
-   - Continuous Watch Auto-Sync mode (`g` toggle in TUI or `--watch-git` via CLI) with automatic *debouncing*.
+   - Continuous Watch Auto-Sync mode (`--watch-git` via CLI, or automatic filesystem watcher in TUI when `gitAutoSync.enabled` is `true`) with automatic *debouncing*.
    - Automatically syncs reverted/restored files (`git restore <file>` / `git checkout -- <file>`) to maintain remote server integrity.
 3. **Zero-Blocking Asynchronous Architecture (Tokio + Dedicated SFTP Worker)**:
    - Network I/O, SSH handshakes, and directory listings run on isolated workers. The `ratatui` UI thread never *freezes* or *stutters*.
@@ -97,21 +97,22 @@ cargo run -- --watch-git
 
 | Key | Action |
 | :--- | :--- |
-| `Tab` | Cycle active pane focus (`Left Pane` ➔ `Right Pane` ➔ `Bottom Pane`) |
-| `1` / `2` | Switch tabs in the active pane (`Git Uncommitted` / `Local Explorer`, `Queue` / `Logs`) |
-| `j` / `Down` | Move cursor down in list / table |
-| `k` / `Up` | Move cursor up in list / table |
-| `Enter` | Enter subdirectory / upload selected local file / download selected remote file |
-| `Backspace` / `-` | Go up to parent directory |
-| `u` | Upload selected local file or directory to server |
-| `d` | Download selected remote file or directory to local |
-| `g` | Toggle Continuous Git Uncommitted Auto-Sync (`ON` / `OFF`) |
-| `G` (*Shift+G*) | Trigger Batch Sync for all current uncommitted files |
-| `p` | Open server Profile Switcher modal (`sftp.json` profiles) |
-| `r` | Refresh local directory, remote directory, and Git status |
-| `c` | Clear completed transfer tasks from the queue |
-| `?` / `h` | Open Help guide modal |
-| `q` / `Ctrl+C` | Exit application safely (*graceful shutdown*) |
+| `Tab` | Cycle active pane (`Left` ➔ `Right` ➔ `Bottom`) |
+| `1`, `2` | Switch tabs in current pane (`Git Uncommitted` / `Local Explorer`, `Queue` / `Logs`) |
+| `j` / `Down` | Navigate down in list/table |
+| `k` / `Up` | Navigate up in list/table |
+| `Enter` | Open folder / Upload selected / Download selected |
+| `Backspace` / `-` | Navigate to parent directory |
+| `u` | Upload selected file or folder (batch) |
+| `d` | Download selected remote file or folder (batch) |
+| `s` | Batch sync selected local/remote folder |
+| `m` | Change remote permissions (`chmod`) on selected item |
+| `G` (*Shift+G*) | One-shot Batch Upload of all uncommitted Git changes |
+| `p` | Open Profile Switcher (`sftp.json` profiles) |
+| `r` | Refresh directory listings and Git status |
+| `c` | Clear completed queue jobs |
+| `?` / `Ctrl+h` | Toggle Help modal |
+| `q` / `Ctrl+C` | Quit gracefully |
 
 ---
 
@@ -158,3 +159,9 @@ cargo run -- --watch-git
   },
 }
 ```
+
+---
+
+## 📄 License
+
+Licensed under the [MIT License](LICENSE).
