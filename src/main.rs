@@ -51,7 +51,7 @@ enum UiUpdate {
     },
     BatchDownloadsReady {
         label: String,
-        result: Result<Vec<(String, PathBuf)>>,
+        result: Result<(Vec<(String, PathBuf)>, Vec<PathBuf>)>,
     },
     ChmodDone {
         remote_path: String,
@@ -82,6 +82,14 @@ struct Cli {
     /// Headless mode: Continuous watch and auto-sync of Git uncommitted files
     #[arg(long)]
     watch_git: bool,
+
+    /// Headless mode: Sync entire local workspace to remote and exit
+    #[arg(long)]
+    sync_local_to_remote: bool,
+
+    /// Headless mode: Sync entire remote directory to local workspace and exit
+    #[arg(long)]
+    sync_remote_to_local: bool,
 }
 
 #[tokio::main]
@@ -113,6 +121,16 @@ async fn main() -> Result<()> {
     // Headless: Continuous Git auto-sync watcher
     if cli.watch_git {
         return run_headless_watch_git(&workspace_root, active_config).await;
+    }
+
+    // Headless: Sync local workspace -> remote
+    if cli.sync_local_to_remote {
+        return run_headless_sync_local_to_remote(&workspace_root, active_config).await;
+    }
+
+    // Headless: Sync remote -> local workspace
+    if cli.sync_remote_to_local {
+        return run_headless_sync_remote_to_local(&workspace_root, active_config).await;
     }
 
     // Interactive TUI Mode
@@ -175,6 +193,18 @@ async fn run_headless_sync_uncommitted(
         }
     }
 
+    drain_headless_conveyer(&mut conveyer_event_rx, queued_count).await?;
+    println!("✔ All {} changes synced successfully!", queued_count);
+    Ok(())
+}
+
+async fn drain_headless_conveyer(
+    conveyer_event_rx: &mut mpsc::UnboundedReceiver<ConveyerEvent>,
+    queued_count: usize,
+) -> Result<()> {
+    if queued_count == 0 {
+        return Ok(());
+    }
     println!("Queued {} task(s). Syncing...", queued_count);
 
     let mut completed_count = 0;
@@ -211,8 +241,109 @@ async fn run_headless_sync_uncommitted(
     if failed_count > 0 {
         return Err(anyhow!("Sync completed with {} failure(s)", failed_count));
     }
+    Ok(())
+}
 
-    println!("✔ All {} changes synced successfully!", completed_count);
+async fn run_headless_sync_local_to_remote(
+    workspace_root: &Path,
+    config: SftpConfig,
+) -> Result<()> {
+    println!("⚡ VSFTUI: Headless Sync Local -> Remote");
+    println!("Workspace : {}", workspace_root.display());
+    println!("Target    : {}@{}:{}", config.username, config.host, config.remote_path);
+
+    let mut items = Vec::new();
+    collect_local_files(workspace_root, workspace_root, &config.remote_path, &config, &mut items)?;
+
+    println!("Connecting to remote...");
+    let remote_fs = create_remote_fs(config.clone()).await?;
+    println!("✔ Connected successfully.");
+
+    let deletes = if config.sync_option.as_ref().is_some_and(|s| s.delete) {
+        compute_extra_remote_deletes(
+            Arc::clone(&remote_fs),
+            workspace_root,
+            config.remote_path.clone(),
+            workspace_root.to_path_buf(),
+            &config,
+            &items,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+
+    let queued_count = items.len() + deletes.len();
+    if queued_count == 0 {
+        println!("✔ Nothing to sync.");
+        return Ok(());
+    }
+
+    let (conveyer_event_tx, mut conveyer_event_rx) = mpsc::unbounded_channel();
+    let conveyer = Arc::new(Conveyer::new(remote_fs, 4, conveyer_event_tx));
+    let use_temp = config.use_temp_file.unwrap_or(false);
+
+    for (local, remote) in items {
+        conveyer.enqueue(TransferKind::Upload, Some(local), remote, use_temp);
+    }
+    for remote in deletes {
+        conveyer.enqueue(TransferKind::Delete, None, remote, false);
+    }
+
+    drain_headless_conveyer(&mut conveyer_event_rx, queued_count).await?;
+    println!("✔ Local -> Remote sync complete ({} task(s)).", queued_count);
+    Ok(())
+}
+
+async fn run_headless_sync_remote_to_local(
+    workspace_root: &Path,
+    config: SftpConfig,
+) -> Result<()> {
+    println!("⚡ VSFTUI: Headless Sync Remote -> Local");
+    println!("Remote    : {}@{}:{}", config.username, config.host, config.remote_path);
+    println!("Workspace : {}", workspace_root.display());
+
+    println!("Connecting to remote...");
+    let remote_fs = create_remote_fs(config.clone()).await?;
+    println!("✔ Connected successfully.");
+
+    let (items, deletes) = compute_remote_to_local_sync(
+        Arc::clone(&remote_fs),
+        workspace_root.to_path_buf(),
+        config.remote_path.clone(),
+        workspace_root.to_path_buf(),
+        config.clone(),
+    )
+    .await?;
+
+    let queued_count = items.len();
+    let delete_count = deletes.len();
+    if queued_count == 0 && delete_count == 0 {
+        println!("✔ Nothing to sync.");
+        return Ok(());
+    }
+
+    for path in deletes {
+        match std::fs::remove_file(&path) {
+            Ok(()) => println!("  ✔ Deleted extra local file: {}", path.display()),
+            Err(e) => eprintln!("  ✖ Failed to delete {}: {}", path.display(), e),
+        }
+    }
+
+    if queued_count > 0 {
+        let (conveyer_event_tx, mut conveyer_event_rx) = mpsc::unbounded_channel();
+        let conveyer = Arc::new(Conveyer::new(remote_fs, 4, conveyer_event_tx));
+
+        for (remote, local) in items {
+            conveyer.enqueue(TransferKind::Download, Some(local), remote, false);
+        }
+
+        drain_headless_conveyer(&mut conveyer_event_rx, queued_count).await?;
+    }
+    println!(
+        "✔ Remote -> Local sync complete ({} download(s), {} local delete(s)).",
+        queued_count, delete_count
+    );
     Ok(())
 }
 
@@ -596,10 +727,12 @@ fn handle_app_action(
             let delete_extra = cfg.sync_option.as_ref().is_some_and(|s| s.delete);
             let remote_dir_scan = remote_dir.clone();
             let local_dir_scan = local_dir.clone();
+            let ws_scan = ws.clone();
+            let cfg_scan = cfg.clone();
             tokio::spawn(async move {
                 let res = tokio::task::spawn_blocking(move || {
                     let mut items = Vec::new();
-                    collect_local_files(&ws, &local_dir, &remote_dir, &cfg, &mut items)?;
+                    collect_local_files(&ws_scan, &local_dir, &remote_dir, &cfg_scan, &mut items)?;
                     Ok::<_, anyhow::Error>(items)
                 })
                 .await
@@ -607,20 +740,23 @@ fn handle_app_action(
 
                 let result = match res {
                     Ok(items) => {
-                        let mut deletes = Vec::new();
-                        if delete_extra {
+                        let deletes = if delete_extra {
                             if let Some(fs) = fs_opt {
-                                if let Ok(remote_items) = collect_remote_files(fs, remote_dir_scan, local_dir_scan).await {
-                                    let local_remotes: std::collections::HashSet<&str> =
-                                        items.iter().map(|(_, r)| r.as_str()).collect();
-                                    for (r_path, _) in remote_items {
-                                        if !local_remotes.contains(r_path.as_str()) {
-                                            deletes.push(r_path);
-                                        }
-                                    }
-                                }
+                                compute_extra_remote_deletes(
+                                    fs,
+                                    &ws,
+                                    remote_dir_scan,
+                                    local_dir_scan,
+                                    &cfg,
+                                    &items,
+                                )
+                                .await
+                            } else {
+                                Vec::new()
                             }
-                        }
+                        } else {
+                            Vec::new()
+                        };
                         Ok((items, deletes))
                     }
                     Err(e) => Err(e),
@@ -638,9 +774,11 @@ fn handle_app_action(
                 return;
             };
             let fs = Arc::clone(fs);
+            let ws = app.workspace_root.clone();
+            let cfg = app.active_config.clone();
             let label = remote_dir.clone();
             tokio::spawn(async move {
-                let result = collect_remote_files(fs, remote_dir, local_dir).await;
+                let result = compute_remote_to_local_sync(fs, ws, remote_dir, local_dir, cfg).await;
                 let _ = ui_tx.send(UiUpdate::BatchDownloadsReady { label, result });
             });
         }
@@ -719,6 +857,86 @@ async fn collect_remote_files(
         }
     }
     Ok(out)
+}
+
+fn is_local_path_ignored(workspace_root: &Path, path: &Path, config: &SftpConfig) -> bool {
+    if let Ok(rel) = path.strip_prefix(workspace_root) {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        return config.is_ignored(&rel_str)
+            || (path.is_dir() && config.is_ignored(&format!("{}/_", rel_str)));
+    }
+    false
+}
+
+async fn compute_extra_remote_deletes(
+    fs: Arc<dyn RemoteFs>,
+    workspace_root: &Path,
+    remote_dir: String,
+    local_dir: PathBuf,
+    config: &SftpConfig,
+    local_items: &[(PathBuf, String)],
+) -> Vec<String> {
+    let mut deletes = Vec::new();
+    if let Ok(remote_items) = collect_remote_files(fs, remote_dir, local_dir).await {
+        let local_remotes: std::collections::HashSet<&str> =
+            local_items.iter().map(|(_, r)| r.as_str()).collect();
+        for (r_path, l_path) in remote_items {
+            if is_local_path_ignored(workspace_root, &l_path, config) {
+                continue;
+            }
+            if !local_remotes.contains(r_path.as_str()) {
+                deletes.push(r_path);
+            }
+        }
+    }
+    deletes
+}
+
+fn compute_extra_local_deletes(
+    workspace_root: &Path,
+    local_dir: &Path,
+    remote_dir: &str,
+    config: &SftpConfig,
+    remote_items: &[(String, PathBuf)],
+) -> Result<Vec<PathBuf>> {
+    let mut local_items = Vec::new();
+    if local_dir.exists() {
+        collect_local_files(workspace_root, local_dir, remote_dir, config, &mut local_items)?;
+    }
+    let remote_locals: std::collections::HashSet<&Path> =
+        remote_items.iter().map(|(_, l)| l.as_path()).collect();
+    Ok(local_items
+        .into_iter()
+        .map(|(l_path, _)| l_path)
+        .filter(|l_path| !remote_locals.contains(l_path.as_path()))
+        .collect())
+}
+
+async fn compute_remote_to_local_sync(
+    fs: Arc<dyn RemoteFs>,
+    workspace_root: PathBuf,
+    remote_dir: String,
+    local_dir: PathBuf,
+    config: SftpConfig,
+) -> Result<(Vec<(String, PathBuf)>, Vec<PathBuf>)> {
+    let raw_items = collect_remote_files(fs, remote_dir.clone(), local_dir.clone()).await?;
+    let items: Vec<(String, PathBuf)> = raw_items
+        .into_iter()
+        .filter(|(_, l_path)| !is_local_path_ignored(&workspace_root, l_path, &config))
+        .collect();
+
+    let deletes = if config.sync_option.as_ref().is_some_and(|s| s.delete) {
+        let items_for_scan = items.clone();
+        tokio::task::spawn_blocking(move || {
+            compute_extra_local_deletes(&workspace_root, &local_dir, &remote_dir, &config, &items_for_scan)
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow!("Local cleanup scan failed: {}", e)))?
+    } else {
+        Vec::new()
+    };
+
+    Ok((items, deletes))
 }
 
 fn handle_ui_update(
@@ -849,12 +1067,25 @@ fn handle_ui_update(
             }
         },
         UiUpdate::BatchDownloadsReady { label, result } => match result {
-            Ok(items) => {
+            Ok((items, deletes)) => {
                 let count = items.len();
+                let mut del_count = 0usize;
+                for path in deletes {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => del_count += 1,
+                        Err(e) => app.add_log("ERROR", format!("Failed to delete {}: {}", path.display(), e)),
+                    }
+                }
+                if del_count > 0 {
+                    app.refresh_local_files();
+                }
                 for (remote, local) in items {
                     let _ = app.action_tx.send(AppAction::EnqueueDownload { remote, local });
                 }
-                app.add_log("INFO", format!("Enqueued {} file(s) from {}", count, label));
+                app.add_log(
+                    "INFO",
+                    format!("Enqueued {} download(s), {} local delete(s) from {}", count, del_count, label),
+                );
             }
             Err(e) => {
                 app.add_log("ERROR", format!("Batch download scan failed ({}): {}", label, e));
@@ -897,5 +1128,27 @@ mod tests {
         assert!(remotes.contains(&"/r/sub/a.txt"));
         assert!(remotes.contains(&"/r/sub/nested/b.txt"));
         assert!(!remotes.iter().any(|r| r.contains(".git")));
+    }
+
+    #[test]
+    fn test_compute_extra_local_deletes_respects_ignore() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("keep.txt"), "keep").unwrap();
+        std::fs::write(root.join("stale.txt"), "stale").unwrap();
+        std::fs::write(root.join("debug.log"), "ignored").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref").unwrap();
+
+        let mut cfg: SftpConfig = serde_json::from_str(
+            r#"{"host":"h","username":"u","remotePath":"/r","ignore":["**/*.log"],"syncOption":{"delete":true}}"#,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+
+        let remote_items = vec![("/r/keep.txt".to_string(), root.join("keep.txt"))];
+        let deletes = compute_extra_local_deletes(root, root, "/r", &cfg, &remote_items).unwrap();
+
+        assert_eq!(deletes, vec![root.join("stale.txt")]);
     }
 }

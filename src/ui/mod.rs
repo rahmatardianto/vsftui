@@ -546,6 +546,8 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
                 Line::from(vec![Span::styled("u         ", Style::default().fg(Color::Cyan)), Span::raw("Upload selected file or folder (batch)")]),
                 Line::from(vec![Span::styled("d         ", Style::default().fg(Color::Cyan)), Span::raw("Download selected remote file or folder (batch)")]),
                 Line::from(vec![Span::styled("s         ", Style::default().fg(Color::Cyan)), Span::raw("Batch sync selected local/remote folder")]),
+                Line::from(vec![Span::styled("U         ", Style::default().fg(Color::Cyan)), Span::raw("Sync entire local workspace -> remote")]),
+                Line::from(vec![Span::styled("D         ", Style::default().fg(Color::Cyan)), Span::raw("Sync entire remote -> local workspace")]),
                 Line::from(vec![Span::styled("m         ", Style::default().fg(Color::Cyan)), Span::raw("Change remote permissions (chmod) on selected item")]),
                 Line::from(vec![Span::styled("G         ", Style::default().fg(Color::Cyan)), Span::raw("One-shot Batch Upload of all uncommitted Git changes")]),
                 Line::from(vec![Span::styled("p         ", Style::default().fg(Color::Cyan)), Span::raw("Open Profile Switcher (sftp.json profiles)")]),

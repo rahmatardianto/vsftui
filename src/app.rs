@@ -382,6 +382,28 @@ impl App {
                 let _ = self.action_tx.send(AppAction::SyncAllUncommitted);
                 return;
             }
+            (KeyCode::Char('U'), KeyModifiers::SHIFT) | (KeyCode::Char('U'), KeyModifiers::NONE) => {
+                if self.abort_if_conn_error() {
+                    return;
+                }
+                self.add_log("INFO", "Syncing local workspace -> remote...".to_string());
+                let _ = self.action_tx.send(AppAction::SyncLocalDir {
+                    local_dir: self.workspace_root.clone(),
+                    remote_dir: self.active_config.remote_path.clone(),
+                });
+                return;
+            }
+            (KeyCode::Char('D'), KeyModifiers::SHIFT) | (KeyCode::Char('D'), KeyModifiers::NONE) => {
+                if self.abort_if_conn_error() {
+                    return;
+                }
+                self.add_log("INFO", "Syncing remote -> local workspace...".to_string());
+                let _ = self.action_tx.send(AppAction::SyncRemoteDir {
+                    remote_dir: self.active_config.remote_path.clone(),
+                    local_dir: self.workspace_root.clone(),
+                });
+                return;
+            }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 self.refresh_local_files();
                 let _ = self.action_tx.send(AppAction::RefreshGitStatus);

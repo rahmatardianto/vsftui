@@ -85,7 +85,14 @@ Ideal for quick deployment scripts, pre-commit hooks, or CI/CD:
 cargo run -- --sync-uncommitted
 ```
 
-### 3. Headless Mode: Continuous Git Watcher Daemon
+### 3. Headless Mode: Sync Local <-> Remote
+Sync the entire local workspace to the remote directory or vice versa:
+```bash
+cargo run -- --sync-local-to-remote
+cargo run -- --sync-remote-to-local
+```
+
+### 4. Headless Mode: Continuous Git Watcher Daemon
 Watches the local working directory and automatically uploads uncommitted Git changes to the server:
 ```bash
 cargo run -- --watch-git
@@ -106,6 +113,8 @@ cargo run -- --watch-git
 | `u` | Upload selected file or folder (batch) |
 | `d` | Download selected remote file or folder (batch) |
 | `s` | Batch sync selected local/remote folder |
+| `U` (*Shift+U*) | Sync entire local workspace -> remote |
+| `D` (*Shift+D*) | Sync entire remote -> local workspace |
 | `m` | Change remote permissions (`chmod`) on selected item |
 | `G` (*Shift+G*) | One-shot Batch Upload of all uncommitted Git changes |
 | `p` | Open Profile Switcher (`sftp.json` profiles) |
