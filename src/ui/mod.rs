@@ -502,6 +502,14 @@ fn draw_logs_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color)
         .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
         .border_style(Style::default().fg(border_color));
 
+    if app.logs.is_empty() {
+        let msg = Paragraph::new("\n  No logs. (Press 'c' on Logs tab to clear logs, 'C' to clear queue & logs)")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(block);
+        frame.render_widget(msg, area);
+        return;
+    }
+
     let items: Vec<ListItem> = app
         .logs
         .iter()
@@ -559,7 +567,8 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
                 Line::from(vec![Span::styled("G         ", Style::default().fg(Color::Cyan)), Span::raw("One-shot Batch Upload of all uncommitted Git changes")]),
                 Line::from(vec![Span::styled("p         ", Style::default().fg(Color::Cyan)), Span::raw("Open Profile Switcher (sftp.json profiles)")]),
                 Line::from(vec![Span::styled("r         ", Style::default().fg(Color::Cyan)), Span::raw("Refresh directory listings and Git status")]),
-                Line::from(vec![Span::styled("c         ", Style::default().fg(Color::Cyan)), Span::raw("Clear completed queue jobs")]),
+                Line::from(vec![Span::styled("c         ", Style::default().fg(Color::Cyan)), Span::raw("Clear completed queue jobs (or logs when Logs tab active)")]),
+                Line::from(vec![Span::styled("C         ", Style::default().fg(Color::Cyan)), Span::raw("Clear both completed queue jobs and logs")]),
                 Line::from(vec![Span::styled("? / Ctrl+h", Style::default().fg(Color::Cyan)), Span::raw("Toggle this Help modal")]),
                 Line::from(vec![Span::styled("q / Ctrl+C", Style::default().fg(Color::Cyan)), Span::raw("Quit gracefully")]),
                 Line::from(""),

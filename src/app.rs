@@ -441,11 +441,16 @@ impl App {
                 return;
             }
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                if let Some(ref c) = self.conveyer {
-                    c.clear_completed();
-                    self.queue_jobs = c.get_jobs();
-                    self.add_log("INFO", "Cleared completed jobs".to_string());
+                if self.active_pane == ActivePane::Bottom && self.bottom_tab == BottomTab::Logs {
+                    self.clear_logs();
+                } else {
+                    self.clear_completed_queue(true);
                 }
+                return;
+            }
+            (KeyCode::Char('C'), KeyModifiers::SHIFT) | (KeyCode::Char('C'), KeyModifiers::NONE) => {
+                self.clear_completed_queue(false);
+                self.clear_logs();
                 return;
             }
             _ => {}
@@ -653,6 +658,26 @@ impl App {
                 });
             }
         }
+    }
+
+    fn clear_completed_queue(&mut self, log_action: bool) {
+        if let Some(ref c) = self.conveyer {
+            c.clear_completed();
+            self.queue_jobs = c.get_jobs();
+            if self.queue_jobs.is_empty() {
+                self.queue_cursor = 0;
+            } else if self.queue_cursor >= self.queue_jobs.len() {
+                self.queue_cursor = self.queue_jobs.len() - 1;
+            }
+            if log_action {
+                self.add_log("INFO", "Cleared completed jobs".to_string());
+            }
+        }
+    }
+
+    fn clear_logs(&mut self) {
+        self.logs.clear();
+        self.logs_scroll = 0;
     }
 
     fn handle_queue_tab_key(&mut self, code: KeyCode) {
