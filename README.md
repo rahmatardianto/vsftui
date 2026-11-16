@@ -1,136 +1,134 @@
-# ⚡ VSFTUI: High-Performance Rust SFTP/FTP TUI with Git Uncommitted Auto-Sync
+# VSFTUI
 
-`vsftui` is a modern Terminal User Interface (TUI) built in **Rust**, designed as a robust, *drop-in compatible* replacement for the Visual Studio Code extension `Natizyskunk/vscode-sftp` (and its original fork `liximomo/vscode-sftp`), featuring first-class **Git Uncommitted Auto-Sync**.
+**A fast, keyboard-driven Terminal UI and CLI for SFTP/FTP synchronization with `.vscode/sftp.json` compatibility and Git uncommitted auto-sync.**
 
----
-
-## 🌟 Key Features
-
-1. **Drop-in `.vscode/sftp.json` Compatibility (JSONC & JSON5)**:
-   - Supports `//` and `/* */` comments as well as *trailing commas*.
-   - Supports Single Config, Multi-Config Array, and Named Profiles (`"profiles": { "dev": {...}, "prod": {...} }`).
-   - Automatic environment variable expansion (`$SSH_AUTH_SOCK`, `$HOME`, and tilde `~`).
-   - Supports SFTP (SSH key/passphrase, agent, password) and plain FTP connections.
-   - Supports SSH Jump Host / Bastion Proxy Hopping (`hop`).
-2. **First-Class Git Uncommitted Auto-Sync**:
-   - Detects uncommitted local file changes in real time via `git2` (*libgit2*).
-   - Marks file statuses: `[M]` (Modified), `[A]` (Staged New), `[??]` (Untracked), `[D]` (Deleted), `[R]` (Renamed).
-   - Batch Sync mode (`Shift+G` in TUI or `--sync-uncommitted` via CLI).
-   - Continuous Watch Auto-Sync mode (`--watch-git` via CLI, or automatic filesystem watcher in TUI when `gitAutoSync.enabled` is `true`) with automatic *debouncing*.
-   - Automatically syncs reverted/restored files (`git restore <file>` / `git checkout -- <file>`) to maintain remote server integrity.
-3. **Zero-Blocking Asynchronous Architecture (Tokio + Dedicated SFTP Worker)**:
-   - Network I/O, SSH handshakes, and directory listings run on isolated workers. The `ratatui` UI thread never *freezes* or *stutters*.
-   - Parallel transfer queue (*Conveyer*) with concurrency control (`tokio::sync::Semaphore`), transfer speed reporting (KB/s, MB/s), and automatic retries with *exponential backoff*.
-   - Atomic transfers: when `"useTempFile": true`, files are uploaded to `<remote>.part` first and atomically renamed upon completion.
-4. **Credential Security**:
-   - Passwords and passphrases are never stored in plaintext logs.
-   - Supports SSH Agent (`$SSH_AUTH_SOCK`) and a masked (`*`) interactive password prompt modal.
+Built in Rust with `ratatui` and `tokio`, `vsftui` keeps network I/O and SSH handshakes off the UI thread so browsing, queuing transfers, and watching Git changes stay responsive.
 
 ---
 
-## 📂 Project Structure
+## Features
 
-```text
-vsftui/
-├── Cargo.toml                  # Dependency manifest & version pins
-├── README.md                   # Complete documentation & usage guide
-├── .vscode/
-│   └── sftp.json               # Example vscode-sftp compatible configuration
-└── src/
-    ├── main.rs                 # CLI entry point (clap), signal handling & TUI bootstrap
-    ├── app.rs                  # Application state machine, event dispatcher, tabs & modals
-    ├── config.rs               # JSONC/JSON5 sftp.json parser, profile resolver & globs
-    ├── git_sync.rs             # Git working tree & index status inspection engine
-    ├── watcher.rs              # Debounced filesystem watcher (notify-debouncer-mini)
-    ├── transfer/
-    │   ├── mod.rs              # Transfer module
-    │   ├── conveyer.rs         # Parallel transfer queue (Semaphore, retry, progress)
-    │   └── fs_provider.rs      # RemoteFs abstraction (SFTP via ssh2 & FTP via suppaftp)
-    └── ui/
-        └── mod.rs              # Responsive 4-zone ratatui layout & modal popups
-```
+- **Drop-in `vscode-sftp` Compatibility**
+  - Reads `.vscode/sftp.json`, `.vscode/sftp.jsonc`, or `sftp.json` (JSONC comments and trailing commas supported).
+  - Supports single configs, multi-config arrays, and named `profiles` overrides.
+  - Expands environment variables (`$SSH_AUTH_SOCK`, `$HOME`) and `~` paths.
+  - Supports `syncOption` (`delete`, `skipCreate`, `ignoreExisting`, `update`), `useTempFile` atomic uploads (`.part` + rename), and `filePerm` / `dirPerm`.
+- **Git Uncommitted Auto-Sync**
+  - Detects staged, modified, untracked, deleted, and renamed files via `libgit2`.
+  - One-shot batch sync (`G` in TUI or `--sync-uncommitted` in CLI).
+  - Debounced filesystem watcher (`--watch-git` in CLI or automatic in TUI) that also syncs reverted files back to the server.
+- **SFTP & FTP with Bastion Hopping**
+  - Authenticates via SSH Agent, private key (+ passphrase), or interactive masked password prompt.
+  - Supports SSH jump host / bastion proxy (`hop`).
+  - Supports FTP (`ftp://`) directory listing, transfers, and `SITE CHMOD`.
+- **Parallel Transfer Queue**
+  - Concurrent transfers with exponential-backoff retries, live progress bar, speed reporting, and structured activity logs.
 
 ---
 
-## 🛠️ Installation & Build
+## Installation
 
-Ensure a Rust toolchain (`cargo` & `rustc`) version 1.80+ or stable is installed (e.g. via `mise` or `rustup`):
+Requires Rust **1.80+** (`cargo` and `rustc`).
 
 ```bash
-# Clone or enter the repository
+git clone https://github.com/gomppm/vsftui.git
 cd vsftui
-
-# Run unit tests
-cargo test
-
-# Build release binary
 cargo build --release
 ```
 
----
+The compiled binary will be at `target/release/vsftui`. To build with vendored OpenSSL and `libgit2`:
 
-## 🚀 Usage Guide
-
-### 1. Interactive Terminal UI (TUI) Mode
-Run inside a project directory containing `.vscode/sftp.json`:
 ```bash
-cargo run
-# or specify a profile:
-cargo run -- --profile production
-```
-
-### 2. Headless Mode: Batch Sync Git Changes (One-Shot)
-Ideal for quick deployment scripts, pre-commit hooks, or CI/CD:
-```bash
-cargo run -- --sync-uncommitted
-```
-
-### 3. Headless Mode: Sync Local <-> Remote
-Sync the entire local workspace to the remote directory or vice versa:
-```bash
-cargo run -- --sync-local-to-remote
-cargo run -- --sync-remote-to-local
-```
-
-### 4. Headless Mode: Continuous Git Watcher Daemon
-Watches the local working directory and automatically uploads uncommitted Git changes to the server:
-```bash
-cargo run -- --watch-git
+cargo build --release --features vendored
 ```
 
 ---
 
-## ⌨️ TUI Keybindings
+## Quick Start
+
+Run `vsftui` inside any project containing `.vscode/sftp.json`:
+
+```bash
+# Launch interactive TUI (uses defaultProfile or first profile)
+vsftui
+
+# Launch with a specific profile or config file
+vsftui --profile production
+vsftui --config path/to/sftp.json --workspace /path/to/project
+```
+
+### Headless CLI Modes
+
+For scripts, pre-commit hooks, or background daemons:
+
+```bash
+# Batch-sync all uncommitted Git changes and exit
+vsftui --sync-uncommitted
+
+# Watch workspace and auto-sync Git changes continuously
+vsftui --watch-git
+
+# Full workspace sync
+vsftui --sync-local-to-remote
+vsftui --sync-remote-to-local
+```
+
+### CLI Options
+
+| Flag | Description |
+| :--- | :--- |
+| `-c, --config <PATH>` | Path to `.vscode/sftp.json` |
+| `-p, --profile <NAME>` | Profile name to activate |
+| `-w, --workspace <DIR>` | Workspace root directory (default: `.`) |
+| `--sync-uncommitted` | Batch-sync uncommitted Git changes and exit |
+| `--watch-git` | Watch and auto-sync uncommitted Git changes |
+| `--sync-local-to-remote` | Sync entire local workspace to remote and exit |
+| `--sync-remote-to-local` | Sync entire remote directory to local workspace and exit |
+
+---
+
+## TUI Keybindings
+
+### Navigation
 
 | Key | Action |
 | :--- | :--- |
-| `Tab` | Cycle active pane (`Left` ➔ `Right` ➔ `Bottom`) |
-| `1`, `2` | Switch tabs in current pane (`Git Uncommitted` / `Local Explorer`, `Queue` / `Logs`) |
-| `j` / `Down` | Navigate down in list/table |
-| `k` / `Up` | Navigate up in list/table |
-| `Enter` | Open folder / Upload selected / Download selected |
-| `Backspace` / `-` | Navigate to parent directory |
-| `u` | Upload selected file or folder (batch) |
-| `d` | Download selected remote file or folder (batch) |
-| `s` | Batch sync selected local/remote folder |
-| `U` (*Shift+U*) | Sync entire local workspace -> remote |
-| `D` (*Shift+D*) | Sync entire remote -> local workspace |
-| `m` | Change remote permissions (`chmod`) on selected item |
-| `G` (*Shift+G*) | One-shot Batch Upload of all uncommitted Git changes |
-| `p` | Open Profile Switcher (`sftp.json` profiles) |
-| `r` | Refresh directory listings and Git status |
-| `c` | Clear completed queue jobs |
+| `Tab` / `Shift+Tab` | Cycle active pane (`Local Workspace` ↔ `Remote Explorer` ↔ `Conveyer & Activity`) |
+| `1` / `2` | Switch tabs in the active pane (`Git` / `Local Files`, `Queue` / `Logs`) |
+| `j` / `Down`, `k` / `Up` | Move cursor or scroll |
+| `Enter` | Open directory, or upload/download selected file |
+| `Backspace` / `-` | Go to parent directory |
+
+### Transfers & Actions
+
+| Key | Action |
+| :--- | :--- |
+| `u` | Upload selected local file or folder |
+| `d` | Download selected remote file or folder |
+| `s` | Sync selected local or remote folder |
+| `G` | Batch-upload all uncommitted Git changes |
+| `U` | Sync entire local workspace → remote |
+| `D` | Sync entire remote → local workspace |
+| `m` | Change octal permissions (`chmod`) on selected local or remote item |
+
+### General
+
+| Key | Action |
+| :--- | :--- |
+| `p` | Open Profile Switcher |
+| `r` | Refresh local files, Git status, and remote directory |
+| `c` | Clear completed queue jobs (or clear logs when Logs tab is active) |
+| `C` | Clear both completed queue jobs and logs |
 | `?` / `Ctrl+h` | Toggle Help modal |
-| `q` / `Ctrl+C` | Quit gracefully |
+| `q` / `Ctrl+c` | Quit |
 
 ---
 
-## ⚙️ Example `.vscode/sftp.json` Configuration
+## Configuration (`.vscode/sftp.json`)
 
 ```jsonc
-// .vscode/sftp.json
 {
-  "name": "Development Server",
+  "name": "dev",
   "host": "dev.example.com",
   "protocol": "sftp",
   "port": 22,
@@ -138,39 +136,64 @@ cargo run -- --watch-git
   "privateKeyPath": "~/.ssh/id_ed25519",
   "agent": "$SSH_AUTH_SOCK",
   "remotePath": "/var/www/my-app",
-  "uploadOnSave": true,
   "useTempFile": true,
+  "filePerm": "644",
+  "dirPerm": "755",
   "ignore": [
     "**/.git/**",
     "**/.vscode/**",
     "**/node_modules/**",
-    "**/target/**",
+    "**/target/**"
   ],
-  // Extended Feature: Git Uncommitted Auto-Sync
+  "syncOption": {
+    "delete": false,
+    "skipCreate": false,
+    "ignoreExisting": false,
+    "update": true
+  },
   "gitAutoSync": {
     "enabled": true,
     "includeUntracked": true,
     "includeStaged": true,
     "includeModified": true,
     "propagateDeletes": false,
-    "debounceMs": 300,
+    "debounceMs": 300
   },
   "profiles": {
     "staging": {
       "host": "staging.example.com",
-      "remotePath": "/var/www/my-app-staging",
+      "remotePath": "/var/www/my-app-staging"
     },
     "production": {
       "host": "prod.example.com",
       "remotePath": "/var/www/my-app-production",
-      "useTempFile": true,
-    },
+      "useTempFile": true
+    }
   },
+  "defaultProfile": "dev"
 }
 ```
 
 ---
 
-## 📄 License
+## Project Layout
+
+```text
+src/
+├── main.rs                  # CLI entry point, headless modes, and async TUI loop
+├── app.rs                   # Application state, keybindings, and modals
+├── config.rs                # JSONC/JSON5 sftp.json parser, profiles, and ignore globs
+├── git_sync.rs              # Git index and working tree status inspector
+├── watcher.rs               # Debounced filesystem watcher
+├── transfer/
+│   ├── conveyer.rs          # Parallel transfer queue with retries and job limits
+│   └── fs_provider.rs       # RemoteFs implementations (SFTP via ssh2, FTP via suppaftp)
+└── ui/
+    └── mod.rs               # Ratatui layout, theme, file tables, and modals
+```
+
+---
+
+## License
 
 Licensed under the [MIT License](LICENSE).
