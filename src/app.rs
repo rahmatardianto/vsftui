@@ -387,6 +387,14 @@ impl App {
                 };
                 return;
             }
+            (KeyCode::BackTab, _) => {
+                self.active_pane = match self.active_pane {
+                    ActivePane::Left => ActivePane::Bottom,
+                    ActivePane::Right => ActivePane::Left,
+                    ActivePane::Bottom => ActivePane::Right,
+                };
+                return;
+            }
             (KeyCode::Char('1'), KeyModifiers::NONE) => {
                 match self.active_pane {
                     ActivePane::Left => self.left_tab = LeftTab::GitUncommitted,

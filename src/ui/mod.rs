@@ -4,13 +4,34 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
-    TableState, Tabs, Wrap,
+    Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Padding, Paragraph, Row,
+    Table, TableState, Wrap,
 };
 
 use crate::app::{ActivePane, App, BottomTab, ChmodTarget, ConnectionStatus, LeftTab, ModalState};
 use crate::git_sync::GitBadge;
 use crate::transfer::conveyer::JobStatus;
+
+mod theme {
+    use ratatui::style::Color;
+
+    pub const BORDER_ACTIVE: Color = Color::Rgb(122, 162, 247);
+    pub const BORDER_INACTIVE: Color = Color::Rgb(65, 72, 104);
+    pub const ACCENT: Color = Color::Rgb(125, 207, 255);
+    pub const ACCENT_WARM: Color = Color::Rgb(224, 175, 104);
+    pub const TEXT_PRIMARY: Color = Color::Rgb(192, 202, 245);
+    pub const TEXT_MUTED: Color = Color::Rgb(120, 128, 160);
+    pub const TEXT_DIM: Color = Color::Rgb(86, 95, 137);
+    pub const BG_SELECTED: Color = Color::Rgb(40, 52, 87);
+    pub const BG_TAB_ACTIVE: Color = Color::Rgb(41, 46, 66);
+    pub const BG_GAUGE: Color = Color::Rgb(30, 35, 52);
+    pub const SUCCESS: Color = Color::Rgb(158, 206, 106);
+    pub const WARNING: Color = Color::Rgb(224, 175, 104);
+    pub const ERROR: Color = Color::Rgb(247, 118, 142);
+    pub const INFO: Color = Color::Rgb(125, 207, 255);
+    pub const DIR_LOCAL: Color = Color::Rgb(125, 207, 255);
+    pub const DIR_REMOTE: Color = Color::Rgb(122, 162, 247);
+}
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let size = frame.area();
@@ -18,15 +39,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),      // Top header bar
-            Constraint::Percentage(62), // Main explorers (Left & Right)
-            Constraint::Percentage(38), // Bottom pane (Queue & Logs)
+            Constraint::Length(3),      // Top status bar
+            Constraint::Percentage(60), // Main explorers (Left & Right)
+            Constraint::Min(8),         // Bottom pane (Queue & Logs)
+            Constraint::Length(1),      // Contextual key-hint footer
         ])
         .split(size);
 
     draw_header(frame, app, chunks[0]);
     draw_main_split(frame, app, chunks[1]);
     draw_bottom_split(frame, app, chunks[2]);
+    draw_footer(frame, app, chunks[3]);
 
     if let Some(ref modal) = app.modal {
         draw_modal(frame, app, modal, size);
@@ -34,48 +57,189 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 // -----------------------------------------------------------------------------
-// Top Header Bar
+// Top Status Bar & Contextual Footer
 // -----------------------------------------------------------------------------
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let (status_text, status_color) = match &app.connection_status {
-        ConnectionStatus::Connected => ("CONNECTED", Color::Green),
-        ConnectionStatus::Connecting => ("CONNECTING...", Color::Yellow),
-        ConnectionStatus::Disconnected => ("DISCONNECTED", Color::Gray),
-        ConnectionStatus::Error(_) => ("CONN ERROR", Color::Red),
+    let (status_icon, status_text, status_color) = match &app.connection_status {
+        ConnectionStatus::Connected => ("●", "Connected", theme::SUCCESS),
+        ConnectionStatus::Connecting => ("◐", "Connecting…", theme::WARNING),
+        ConnectionStatus::Disconnected => ("○", "Disconnected", theme::TEXT_MUTED),
+        ConnectionStatus::Error(_) => ("✕", "Conn Error", theme::ERROR),
     };
 
-    let protocol_badge = Span::styled(
-        format!(" [{}] ", app.active_config.protocol.to_uppercase()),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    let endpoint = format!(
+        "{}://{}@{}:{}",
+        app.active_config.protocol.to_lowercase(),
+        app.active_config.username,
+        app.active_config.host,
+        app.active_config.port
     );
 
-    let profile_badge = Span::styled(
-        format!(" Profile: {} ", app.active_profile_name),
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    );
+    let mut spans = vec![
+        Span::styled(
+            " ⚡ VSFTUI ",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("Profile: ", Style::default().fg(theme::TEXT_MUTED)),
+        Span::styled(
+            app.active_profile_name.as_str(),
+            Style::default()
+                .fg(theme::ACCENT_WARM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled(endpoint, Style::default().fg(theme::TEXT_PRIMARY)),
+        Span::styled(" │ ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled(
+            format!("{} {}", status_icon, status_text),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
 
-    let status_badge = Span::styled(
-        format!(" Status: {} ", status_text),
-        Style::default().fg(status_color).add_modifier(Modifier::BOLD),
-    );
-
-    let header_line = Line::from(vec![
-        Span::styled("⚡ VSFTUI ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        profile_badge,
-        protocol_badge,
-        status_badge,
-        Span::raw(" | "),
-        Span::styled("[Tab] Pane  [u] Upload  [d] Download  [s] Sync Dir  [G] Batch Git  [p] Profile  [?] Help  [q] Quit", Style::default().fg(Color::DarkGray)),
-    ]);
+    if let ConnectionStatus::Error(err) = &app.connection_status {
+        let short_err: String = err.chars().take(40).collect();
+        spans.push(Span::styled(
+            format!(" ({})", short_err),
+            Style::default().fg(theme::ERROR),
+        ));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(Style::default().fg(theme::BORDER_INACTIVE));
 
-    let paragraph = Paragraph::new(header_line).block(block);
+    let paragraph = Paragraph::new(Line::from(spans)).block(block);
     frame.render_widget(paragraph, area);
+}
+
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let mut hints: Vec<(&str, &str)> = vec![("Tab", "Pane"), ("j/k", "Move")];
+
+    match app.active_pane {
+        ActivePane::Left => match app.left_tab {
+            LeftTab::GitUncommitted => {
+                hints.extend([("1/2", "Tab"), ("Enter/u", "Upload"), ("G", "Batch Git")]);
+            }
+            LeftTab::LocalExplorer => {
+                hints.extend([
+                    ("1/2", "Tab"),
+                    ("Enter", "Open/Upload"),
+                    ("Bksp", "Up"),
+                    ("u/s", "Upload"),
+                    ("m", "Chmod"),
+                ]);
+            }
+        },
+        ActivePane::Right => {
+            hints.extend([
+                ("Enter", "Open/Download"),
+                ("Bksp", "Up"),
+                ("d/s", "Download"),
+                ("m", "Chmod"),
+            ]);
+        }
+        ActivePane::Bottom => match app.bottom_tab {
+            BottomTab::TransferQueue => {
+                hints.extend([("1/2", "Tab"), ("c", "Clear Done"), ("C", "Clear All")]);
+            }
+            BottomTab::Logs => {
+                hints.extend([("1/2", "Tab"), ("c", "Clear Logs"), ("C", "Clear All")]);
+            }
+        },
+    }
+
+    hints.extend([("r", "Refresh"), ("p", "Profile"), ("?", "Help"), ("q", "Quit")]);
+
+    let mut spans = vec![Span::raw(" ")];
+    for (idx, (key, label)) in hints.into_iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("  ", Style::default()));
+        }
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default()
+                .fg(theme::ACCENT_WARM)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(theme::TEXT_MUTED),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// -----------------------------------------------------------------------------
+// Pane Helpers
+// -----------------------------------------------------------------------------
+
+fn pane_block(title: &str, is_focused: bool) -> Block<'_> {
+    let border_color = if is_focused {
+        theme::BORDER_ACTIVE
+    } else {
+        theme::BORDER_INACTIVE
+    };
+    let title_color = if is_focused {
+        theme::ACCENT
+    } else {
+        theme::TEXT_MUTED
+    };
+    let marker = if is_focused { "▶ " } else { "" };
+
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(format!(" {}{} ", marker, title))
+        .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD))
+}
+
+fn render_tab_bar(
+    frame: &mut Frame,
+    area: Rect,
+    tabs: &[(&str, usize)],
+    selected: usize,
+    trailing: Option<(&str, Color)>,
+) {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (label, _)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default()));
+        }
+        let is_active = i == selected;
+        let style = if is_active {
+            Style::default()
+                .fg(theme::ACCENT_WARM)
+                .bg(theme::BG_TAB_ACTIVE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT_MUTED)
+        };
+        spans.push(Span::styled(format!(" {} ", label), style));
+    }
+
+    if let Some((text, color)) = trailing {
+        spans.push(Span::styled("  │  ", Style::default().fg(theme::TEXT_DIM)));
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_divider(frame: &mut Frame, area: Rect) {
+    let line = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().fg(theme::TEXT_DIM)),
+        area,
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -94,51 +258,73 @@ fn draw_main_split(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_left_pane(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.active_pane == ActivePane::Left;
-    let border_color = if is_focused { Color::Green } else { Color::DarkGray };
+    let outer = pane_block("LOCAL WORKSPACE", is_focused);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
-    let tab_titles = vec![
-        format!("[1] Git Uncommitted ({})", app.git_changes.len()),
-        "[2] Local Files".to_string(),
-    ];
+    if inner.height < 3 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Inline tabs + path
+            Constraint::Length(1), // Divider
+            Constraint::Min(0),    // Content
+        ])
+        .split(inner);
+
+    let git_label = format!("[1] Git ({})", app.git_changes.len());
     let selected_tab = match app.left_tab {
         LeftTab::GitUncommitted => 0,
         LeftTab::LocalExplorer => 1,
     };
 
-    let inner_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
+    let rel_cwd = app
+        .local_current_dir
+        .strip_prefix(&app.workspace_root)
+        .unwrap_or(&app.local_current_dir);
+    let path_str = if rel_cwd.as_os_str().is_empty() {
+        "./".to_string()
+    } else {
+        format!("./{}", rel_cwd.to_string_lossy())
+    };
+    let trailing = match app.left_tab {
+        LeftTab::LocalExplorer => Some((path_str.as_str(), theme::ACCENT)),
+        LeftTab::GitUncommitted => None,
+    };
 
-    let tabs = Tabs::new(tab_titles)
-        .block(
-            Block::default()
-                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color))
-                .title(if is_focused { " ▶ LOCAL WORKSPACE " } else { " LOCAL WORKSPACE " })
-                .title_style(Style::default().fg(if is_focused { Color::Green } else { Color::White }).add_modifier(Modifier::BOLD)),
-        )
-        .select(selected_tab)
-        .style(Style::default().fg(Color::Gray))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-
-    frame.render_widget(tabs, inner_layout[0]);
+    render_tab_bar(
+        frame,
+        chunks[0],
+        &[(git_label.as_str(), 0), ("[2] Local Files", 1)],
+        selected_tab,
+        trailing,
+    );
+    render_divider(frame, chunks[1]);
 
     match app.left_tab {
-        LeftTab::GitUncommitted => draw_git_uncommitted_list(frame, app, inner_layout[1], border_color),
-        LeftTab::LocalExplorer => draw_local_explorer_table(frame, app, inner_layout[1], border_color),
+        LeftTab::GitUncommitted => draw_git_uncommitted_list(frame, app, chunks[2], is_focused),
+        LeftTab::LocalExplorer => draw_local_explorer_table(frame, app, chunks[2], is_focused),
     }
 }
 
-fn draw_git_uncommitted_list(frame: &mut Frame, app: &App, area: Rect, border_color: Color) {
-    let block = Block::default()
-        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(border_color));
-
+fn draw_git_uncommitted_list(frame: &mut Frame, app: &App, area: Rect, is_focused: bool) {
     if app.git_changes.is_empty() {
-        let msg = Paragraph::new("\n  ✔ Working tree clean. No uncommitted Git changes.")
-            .style(Style::default().fg(Color::Green))
-            .block(block);
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  ✔ Working tree clean",
+                Style::default()
+                    .fg(theme::SUCCESS)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  No uncommitted Git changes. Press [2] for Local Files.",
+                Style::default().fg(theme::TEXT_MUTED),
+            )),
+        ]);
         frame.render_widget(msg, area);
         return;
     }
@@ -146,64 +332,81 @@ fn draw_git_uncommitted_list(frame: &mut Frame, app: &App, area: Rect, border_co
     let items: Vec<ListItem> = app
         .git_changes
         .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let is_selected = i == app.git_cursor && app.active_pane == ActivePane::Left;
-            let (badge_str, badge_style) = match item.badge {
-                GitBadge::Modified => (" M  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                GitBadge::Added => (" A  ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                GitBadge::Untracked => (" ?? ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                GitBadge::Deleted => (" D  ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                GitBadge::Renamed => (" R  ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        .map(|item| {
+            let (badge_str, badge_color) = match item.badge {
+                GitBadge::Modified => (" M  ", theme::WARNING),
+                GitBadge::Added => (" A  ", theme::SUCCESS),
+                GitBadge::Untracked => (" ?? ", theme::INFO),
+                GitBadge::Deleted => (" D  ", theme::ERROR),
+                GitBadge::Renamed => (" R  ", Color::Magenta),
             };
 
             let staged_marker = if item.is_staged {
-                Span::styled("[STAGED] ", Style::default().fg(Color::Green))
+                Span::styled("STAGED   ", Style::default().fg(theme::SUCCESS))
             } else {
-                Span::styled("[UNSTAGED] ", Style::default().fg(Color::DarkGray))
+                Span::styled("UNSTAGED ", Style::default().fg(theme::TEXT_MUTED))
             };
 
             let line = Line::from(vec![
-                Span::styled(badge_str, badge_style),
+                Span::styled(
+                    badge_str,
+                    Style::default()
+                        .fg(badge_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 staged_marker,
                 Span::styled(
                     item.rel_path.to_string_lossy().to_string(),
-                    if is_selected {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
+                    Style::default().fg(theme::TEXT_PRIMARY),
                 ),
             ]);
 
-            if is_selected {
-                ListItem::new(line).style(Style::default().bg(Color::Rgb(30, 50, 70)))
-            } else {
-                ListItem::new(line)
-            }
+            ListItem::new(line)
         })
         .collect();
 
-    let list = List::new(items).block(block);
-    let mut state = ListState::default().with_selected((!app.git_changes.is_empty()).then_some(app.git_cursor));
+    let highlight_style = if is_focused {
+        Style::default()
+            .bg(theme::BG_SELECTED)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(theme::BG_TAB_ACTIVE)
+    };
+
+    let list = List::new(items)
+        .highlight_style(highlight_style)
+        .highlight_symbol("▶ ");
+    let mut state =
+        ListState::default().with_selected((!app.git_changes.is_empty()).then_some(app.git_cursor));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_color: Color) {
-    let rel_cwd = app.local_current_dir.strip_prefix(&app.workspace_root).unwrap_or(&app.local_current_dir);
-    let title = format!(" Path: ./{} ", rel_cwd.to_string_lossy());
+struct FileRowView<'a> {
+    name: &'a str,
+    is_dir: bool,
+    size: u64,
+    permissions: Option<u32>,
+    modified: Option<DateTime<Utc>>,
+}
 
-    let block = Block::default()
-        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(border_color))
-        .title(title);
+fn render_file_table(
+    frame: &mut Frame,
+    area: Rect,
+    entries: &[FileRowView<'_>],
+    cursor: usize,
+    is_focused: bool,
+    dir_color: Color,
+    empty_lines: Vec<Line<'static>>,
+) {
+    if entries.is_empty() {
+        frame.render_widget(Paragraph::new(empty_lines), area);
+        return;
+    }
 
-    let rows: Vec<Row> = app
-        .local_entries
+    let rows: Vec<Row> = entries
         .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let is_selected = i == app.local_cursor && app.active_pane == ActivePane::Left;
+        .map(|entry| {
             let icon = if entry.is_dir { "📁 " } else { "📄 " };
             let size_str = if entry.is_dir {
                 "-".to_string()
@@ -212,16 +415,14 @@ fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_co
             };
             let perm_str = entry
                 .permissions
-                .map(|p| format!("{:o}", p & 0o777))
+                .map(|p| format!("{:03o}", p & 0o777))
                 .unwrap_or_else(|| "-".to_string());
             let mtime_str = format_modified(entry.modified);
 
-            let row_style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::Rgb(30, 50, 70)).add_modifier(Modifier::BOLD)
-            } else if entry.is_dir {
-                Style::default().fg(Color::Cyan)
+            let row_style = if entry.is_dir {
+                Style::default().fg(dir_color)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme::TEXT_PRIMARY)
             };
 
             Row::new(vec![
@@ -234,24 +435,70 @@ fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_co
         })
         .collect();
 
+    let highlight_style = if is_focused {
+        Style::default()
+            .bg(theme::BG_SELECTED)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(theme::BG_TAB_ACTIVE)
+    };
+
     let table = Table::new(
         rows,
         [
             Constraint::Percentage(50),
-            Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(18),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(17),
         ],
     )
     .header(
         Row::new(vec!["Name", "Perm", "Size", "Modified"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(theme::ACCENT_WARM)
+                    .add_modifier(Modifier::BOLD),
+            )
             .bottom_margin(1),
     )
-    .block(block);
+    .row_highlight_style(highlight_style)
+    .highlight_symbol("▶ ");
 
-    let mut state = TableState::default().with_selected((!app.local_entries.is_empty()).then_some(app.local_cursor));
+    let mut state = TableState::default().with_selected(Some(cursor));
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, is_focused: bool) {
+    let views: Vec<FileRowView<'_>> = app
+        .local_entries
+        .iter()
+        .map(|e| FileRowView {
+            name: &e.name,
+            is_dir: e.is_dir,
+            size: e.size,
+            permissions: e.permissions,
+            modified: e.modified,
+        })
+        .collect();
+
+    let empty = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Directory is empty.",
+            Style::default().fg(theme::TEXT_MUTED),
+        )),
+    ];
+
+    render_file_table(
+        frame,
+        area,
+        &views,
+        app.local_cursor,
+        is_focused,
+        theme::DIR_LOCAL,
+        empty,
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -260,83 +507,91 @@ fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_co
 
 fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.active_pane == ActivePane::Right;
-    let border_color = if is_focused { Color::Green } else { Color::DarkGray };
+    let outer = pane_block("REMOTE EXPLORER", is_focused);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
-    let title = format!(
-        "{} REMOTE EXPLORER: {} ",
-        if is_focused { "▶" } else { "" },
-        app.remote_current_dir
-    );
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(title)
-        .title_style(Style::default().fg(if is_focused { Color::Green } else { Color::White }).add_modifier(Modifier::BOLD));
-
-    if app.remote_entries.is_empty() {
-        let msg = Paragraph::new("\n  (Directory empty or remote not connected)")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        frame.render_widget(msg, area);
+    if inner.height < 3 {
         return;
     }
 
-    let rows: Vec<Row> = app
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Path bar
+            Constraint::Length(1), // Divider
+            Constraint::Min(0),    // File table
+        ])
+        .split(inner);
+
+    let path_line = Line::from(vec![
+        Span::styled(" Path: ", Style::default().fg(theme::TEXT_MUTED)),
+        Span::styled(
+            app.remote_current_dir.as_str(),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(path_line), chunks[0]);
+    render_divider(frame, chunks[1]);
+
+    let empty = match &app.connection_status {
+        ConnectionStatus::Connecting => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  ◐ Connecting to remote server…",
+                Style::default().fg(theme::WARNING),
+            )),
+        ],
+        ConnectionStatus::Error(err) => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  ✕ Connection error: {}", err),
+                Style::default().fg(theme::ERROR),
+            )),
+            Line::from(Span::styled(
+                "  Press [r] to retry or [p] to switch profile.",
+                Style::default().fg(theme::TEXT_MUTED),
+            )),
+        ],
+        ConnectionStatus::Disconnected => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  ○ Not connected. Press [r] to connect or [p] to pick a profile.",
+                Style::default().fg(theme::TEXT_MUTED),
+            )),
+        ],
+        ConnectionStatus::Connected => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Remote directory is empty.",
+                Style::default().fg(theme::TEXT_MUTED),
+            )),
+        ],
+    };
+
+    let views: Vec<FileRowView<'_>> = app
         .remote_entries
         .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let is_selected = i == app.remote_cursor && app.active_pane == ActivePane::Right;
-            let icon = if entry.is_dir { "📁 " } else { "📄 " };
-            let size_str = if entry.is_dir {
-                "-".to_string()
-            } else {
-                format_size(entry.size)
-            };
-            let perm_str = entry
-                .permissions
-                .map(|p| format!("{:o}", p & 0o777))
-                .unwrap_or_else(|| "-".to_string());
-            let mtime_str = format_modified(entry.modified);
-
-            let row_style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::Rgb(30, 50, 70)).add_modifier(Modifier::BOLD)
-            } else if entry.is_dir {
-                Style::default().fg(Color::LightBlue)
-            } else {
-                Style::default().fg(Color::White)
-            };
-
-            Row::new(vec![
-                format!("{}{}", icon, entry.name),
-                perm_str,
-                size_str,
-                mtime_str,
-            ])
-            .style(row_style)
+        .map(|e| FileRowView {
+            name: &e.name,
+            is_dir: e.is_dir,
+            size: e.size,
+            permissions: e.permissions,
+            modified: e.modified,
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(50),
-            Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(18),
-        ],
-    )
-    .header(
-        Row::new(vec!["Name", "Perm", "Size", "Modified"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-            .bottom_margin(1),
-    )
-    .block(block);
-
-    let mut state = TableState::default().with_selected((!app.remote_entries.is_empty()).then_some(app.remote_cursor));
-    frame.render_stateful_widget(table, area, &mut state);
+    render_file_table(
+        frame,
+        chunks[2],
+        &views,
+        app.remote_cursor,
+        is_focused,
+        theme::DIR_REMOTE,
+        empty,
+    );
 }
 
 fn format_modified(modified: Option<DateTime<Utc>>) -> String {
@@ -351,7 +606,22 @@ fn format_modified(modified: Option<DateTime<Utc>>) -> String {
 
 fn draw_bottom_split(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.active_pane == ActivePane::Bottom;
-    let border_color = if is_focused { Color::Green } else { Color::DarkGray };
+    let outer = pane_block("CONVEYER & ACTIVITY", is_focused);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    if inner.height < 3 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Inline tabs
+            Constraint::Length(1), // Divider
+            Constraint::Min(0),    // Content
+        ])
+        .split(inner);
 
     let active_transfers = app
         .queue_jobs
@@ -359,50 +629,42 @@ fn draw_bottom_split(frame: &mut Frame, app: &App, area: Rect) {
         .filter(|j| matches!(j.status, JobStatus::Running | JobStatus::Retrying(_)))
         .count();
 
-    let tab_titles = vec![
-        format!("[1] Transfer Queue ({}/{})", active_transfers, app.queue_jobs.len()),
-        format!("[2] Logs ({})", app.logs.len()),
-    ];
+    let queue_label = format!("[1] Queue ({}/{})", active_transfers, app.queue_jobs.len());
+    let logs_label = format!("[2] Logs ({})", app.logs.len());
 
     let selected_tab = match app.bottom_tab {
         BottomTab::TransferQueue => 0,
         BottomTab::Logs => 1,
     };
 
-    let inner_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
-
-    let tabs = Tabs::new(tab_titles)
-        .block(
-            Block::default()
-                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color))
-                .title(if is_focused { " ▶ CONVEYER & ACTIVITY " } else { " CONVEYER & ACTIVITY " })
-                .title_style(Style::default().fg(if is_focused { Color::Green } else { Color::White }).add_modifier(Modifier::BOLD)),
-        )
-        .select(selected_tab)
-        .style(Style::default().fg(Color::Gray))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-
-    frame.render_widget(tabs, inner_layout[0]);
+    render_tab_bar(
+        frame,
+        chunks[0],
+        &[(queue_label.as_str(), 0), (logs_label.as_str(), 1)],
+        selected_tab,
+        None,
+    );
+    render_divider(frame, chunks[1]);
 
     match app.bottom_tab {
-        BottomTab::TransferQueue => draw_queue_pane(frame, app, inner_layout[1], border_color),
-        BottomTab::Logs => draw_logs_pane(frame, app, inner_layout[1], border_color),
+        BottomTab::TransferQueue => draw_queue_pane(frame, app, chunks[2], is_focused),
+        BottomTab::Logs => draw_logs_pane(frame, app, chunks[2]),
     }
 }
 
-fn draw_queue_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color) {
-    let block = Block::default()
-        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(border_color));
-
+fn draw_queue_pane(frame: &mut Frame, app: &App, area: Rect, is_focused: bool) {
     if app.queue_jobs.is_empty() {
-        let msg = Paragraph::new("\n  Transfer queue idle. (Press 'u' to upload, 'd' to download, 'g' for Git auto-sync)")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Transfer queue is idle.",
+                Style::default().fg(theme::TEXT_MUTED),
+            )),
+            Line::from(Span::styled(
+                "  Select a file and press [u] to upload, [d] to download, or [G] to sync Git changes.",
+                Style::default().fg(theme::TEXT_DIM),
+            )),
+        ]);
         frame.render_widget(msg, area);
         return;
     }
@@ -415,7 +677,7 @@ fn draw_queue_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color
     let layout = if running_job.is_some() {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(area)
     } else {
         Layout::default()
@@ -428,18 +690,30 @@ fn draw_queue_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color
         let percent = if active.size > 0 {
             ((active.transferred as f64 / active.size as f64) * 100.0) as u16
         } else {
-            50
+            0
         };
         let gauge_label = format!(
-            "Transferring #{}: {} ({}/{})",
+            " {} #{}: {} ({}/{}) {}% ",
+            active.kind.as_str(),
             active.id,
             active.remote_path,
             format_size(active.transferred),
-            format_size(active.size)
+            format_size(active.size),
+            percent.min(100)
         );
         let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)))
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Rgb(20, 30, 40)))
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(theme::TEXT_DIM)),
+            )
+            .gauge_style(
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .bg(theme::BG_GAUGE)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .use_unicode(true)
             .percent(percent.min(100))
             .label(gauge_label);
         frame.render_widget(gauge, layout[0]);
@@ -449,14 +723,18 @@ fn draw_queue_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color
         .queue_jobs
         .iter()
         .rev()
-        .take(50)
         .map(|job| {
             let (status_str, status_style) = match &job.status {
-                JobStatus::Pending => ("PENDING", Style::default().fg(Color::Gray)),
-                JobStatus::Running => ("RUNNING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                JobStatus::Success => ("SUCCESS", Style::default().fg(Color::Green)),
-                JobStatus::Failed(_) => ("FAILED", Style::default().fg(Color::Red)),
-                JobStatus::Retrying(_) => ("RETRY", Style::default().fg(Color::LightRed)),
+                JobStatus::Pending => ("⏳ Pending", Style::default().fg(theme::TEXT_MUTED)),
+                JobStatus::Running => (
+                    "▶ Running",
+                    Style::default()
+                        .fg(theme::WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                JobStatus::Success => ("✔ Done", Style::default().fg(theme::SUCCESS)),
+                JobStatus::Failed(_) => ("✕ Failed", Style::default().fg(theme::ERROR)),
+                JobStatus::Retrying(_) => ("↻ Retry", Style::default().fg(theme::WARNING)),
             };
 
             let speed_str = if job.speed_bytes_per_sec > 0.0 {
@@ -477,116 +755,164 @@ fn draw_queue_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color
         })
         .collect();
 
+    let highlight_style = if is_focused {
+        Style::default().bg(theme::BG_SELECTED)
+    } else {
+        Style::default()
+    };
+
     let table = Table::new(
         rows,
         [
             Constraint::Length(6),
+            Constraint::Length(9),
+            Constraint::Percentage(48),
             Constraint::Length(10),
-            Constraint::Percentage(50),
+            Constraint::Length(11),
             Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(14),
         ],
     )
     .header(
         Row::new(vec!["ID", "Action", "Remote Target", "Size", "Status", "Speed"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            .style(
+                Style::default()
+                    .fg(theme::ACCENT_WARM)
+                    .add_modifier(Modifier::BOLD),
+            ),
     )
-    .block(block);
+    .row_highlight_style(highlight_style);
 
-    frame.render_widget(table, layout[1]);
+    let mut state = TableState::default().with_selected(Some(app.queue_cursor));
+    frame.render_stateful_widget(table, layout[1], &mut state);
 }
 
-fn draw_logs_pane(frame: &mut Frame, app: &App, area: Rect, border_color: Color) {
-    let block = Block::default()
-        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(border_color));
-
+fn draw_logs_pane(frame: &mut Frame, app: &App, area: Rect) {
     if app.logs.is_empty() {
-        let msg = Paragraph::new("\n  No logs. (Press 'c' on Logs tab to clear logs, 'C' to clear queue & logs)")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No logs yet. Press [c] to clear logs, [C] to clear queue & logs.",
+                Style::default().fg(theme::TEXT_MUTED),
+            )),
+        ]);
         frame.render_widget(msg, area);
         return;
     }
 
+    let visible_height = area.height as usize;
     let items: Vec<ListItem> = app
         .logs
         .iter()
         .rev()
         .skip(app.logs_scroll)
-        .take(30)
+        .take(visible_height.max(1))
         .map(|log| {
-            let (lvl_str, lvl_style) = match log.level.as_str() {
-                "ERROR" => ("ERROR", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                "WARN" => ("WARN ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                "INFO" => ("INFO ", Style::default().fg(Color::Cyan)),
-                _ => ("DEBUG", Style::default().fg(Color::DarkGray)),
+            let (lvl_str, lvl_color) = match log.level.as_str() {
+                "ERROR" => ("ERR", theme::ERROR),
+                "WARN" => ("WRN", theme::WARNING),
+                "INFO" => ("INF", theme::INFO),
+                _ => ("DBG", theme::TEXT_MUTED),
             };
 
             let line = Line::from(vec![
-                Span::styled(log.timestamp.format("%H:%M:%S ").to_string(), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("[{}] ", lvl_str), lvl_style),
-                Span::styled(&log.message, Style::default().fg(Color::White)),
+                Span::styled(
+                    log.timestamp.format(" %H:%M:%S ").to_string(),
+                    Style::default().fg(theme::TEXT_DIM),
+                ),
+                Span::styled(
+                    format!("[{}] ", lvl_str),
+                    Style::default()
+                        .fg(lvl_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&log.message, Style::default().fg(theme::TEXT_PRIMARY)),
             ]);
 
             ListItem::new(line)
         })
         .collect();
 
-    let list = List::new(items).block(block);
-    let mut state = ListState::default().with_selected((!app.git_changes.is_empty()).then_some(app.git_cursor));
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_widget(List::new(items), area);
 }
 
 // -----------------------------------------------------------------------------
-// Modals: Profile Switcher, Password Prompt, Help
+// Modals: Profile Switcher, Password Prompt, Chmod Prompt, Help
 // -----------------------------------------------------------------------------
 
 fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rect) {
     match modal {
         ModalState::Help => {
-            let area = centered_rect(60, 60, screen_size);
+            let area = centered_rect_clamped(64, 60, 72, 24, screen_size);
             frame.render_widget(Clear, area);
 
+            let key_row = |key: &'static str, desc: &'static str| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {:<15}", key),
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(desc, Style::default().fg(theme::TEXT_PRIMARY)),
+                ])
+            };
+            let section = |title: &'static str| {
+                Line::from(Span::styled(
+                    format!(" {}", title),
+                    Style::default()
+                        .fg(theme::ACCENT_WARM)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            };
+
             let help_text = vec![
-                Line::from(Span::styled("⚡ VSFTUI Keybindings Guide", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                section("NAVIGATION"),
+                key_row("Tab / S-Tab", "Cycle active pane (Local / Remote / Bottom)"),
+                key_row("1 / 2", "Switch tabs in active pane"),
+                key_row("j / k / ↑ / ↓", "Move cursor or scroll"),
+                key_row("Enter", "Open folder, or upload/download selected file"),
+                key_row("Bksp / -", "Go to parent directory"),
                 Line::from(""),
-                Line::from(vec![Span::styled("Tab       ", Style::default().fg(Color::Cyan)), Span::raw("Cycle active pane (Left -> Right -> Bottom)")]),
-                Line::from(vec![Span::styled("1, 2      ", Style::default().fg(Color::Cyan)), Span::raw("Switch tabs in current pane")]),
-                Line::from(vec![Span::styled("j / Down  ", Style::default().fg(Color::Cyan)), Span::raw("Navigate down in list/table")]),
-                Line::from(vec![Span::styled("k / Up    ", Style::default().fg(Color::Cyan)), Span::raw("Navigate up in list/table")]),
-                Line::from(vec![Span::styled("Enter     ", Style::default().fg(Color::Cyan)), Span::raw("Open folder / Upload selected / Download selected")]),
-                Line::from(vec![Span::styled("Backspace / -", Style::default().fg(Color::Cyan)), Span::raw(" Navigate to parent directory")]),
-                Line::from(vec![Span::styled("u         ", Style::default().fg(Color::Cyan)), Span::raw("Upload selected file or folder (batch)")]),
-                Line::from(vec![Span::styled("d         ", Style::default().fg(Color::Cyan)), Span::raw("Download selected remote file or folder (batch)")]),
-                Line::from(vec![Span::styled("s         ", Style::default().fg(Color::Cyan)), Span::raw("Batch sync selected local/remote folder")]),
-                Line::from(vec![Span::styled("U         ", Style::default().fg(Color::Cyan)), Span::raw("Sync entire local workspace -> remote")]),
-                Line::from(vec![Span::styled("D         ", Style::default().fg(Color::Cyan)), Span::raw("Sync entire remote -> local workspace")]),
-                Line::from(vec![Span::styled("m         ", Style::default().fg(Color::Cyan)), Span::raw("Change permissions (chmod) on selected local/remote item")]),
-                Line::from(vec![Span::styled("G         ", Style::default().fg(Color::Cyan)), Span::raw("One-shot Batch Upload of all uncommitted Git changes")]),
-                Line::from(vec![Span::styled("p         ", Style::default().fg(Color::Cyan)), Span::raw("Open Profile Switcher (sftp.json profiles)")]),
-                Line::from(vec![Span::styled("r         ", Style::default().fg(Color::Cyan)), Span::raw("Refresh directory listings and Git status")]),
-                Line::from(vec![Span::styled("c         ", Style::default().fg(Color::Cyan)), Span::raw("Clear completed queue jobs (or logs when Logs tab active)")]),
-                Line::from(vec![Span::styled("C         ", Style::default().fg(Color::Cyan)), Span::raw("Clear both completed queue jobs and logs")]),
-                Line::from(vec![Span::styled("? / Ctrl+h", Style::default().fg(Color::Cyan)), Span::raw("Toggle this Help modal")]),
-                Line::from(vec![Span::styled("q / Ctrl+C", Style::default().fg(Color::Cyan)), Span::raw("Quit gracefully")]),
+                section("TRANSFERS & SYNC"),
+                key_row("u / d", "Upload (local) or download (remote) selected item"),
+                key_row("s", "Sync selected local or remote folder"),
+                key_row("G", "Batch upload all uncommitted Git changes"),
+                key_row("U / D", "Sync entire workspace (U: up, D: down)"),
+                key_row("m", "Change permissions (chmod) on selected item"),
                 Line::from(""),
-                Line::from(Span::styled("Press [Esc] or [q] to close this help window.", Style::default().fg(Color::DarkGray))),
+                section("GENERAL"),
+                key_row("p", "Switch sftp.json profile"),
+                key_row("r", "Refresh files, Git status, and remote directory"),
+                key_row("c / C", "Clear completed queue/logs (C clears both)"),
+                key_row("? / Ctrl+h", "Toggle this Help window"),
+                key_row("q / Ctrl+c", "Quit VSFTUI"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Press [Esc], [?], or [q] to close.",
+                    Style::default().fg(theme::TEXT_MUTED),
+                )),
             ];
 
             let block = Block::default()
-                .title(" HELP & KEYBINDINGS ")
+                .title(" ⚡ HELP & KEYBINDINGS ")
+                .title_style(
+                    Style::default()
+                        .fg(theme::ACCENT_WARM)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .border_style(Style::default().fg(Color::Yellow));
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::BORDER_ACTIVE))
+                .padding(Padding::uniform(1));
 
-            let p = Paragraph::new(help_text).block(block).wrap(Wrap { trim: true });
+            let p = Paragraph::new(help_text)
+                .block(block)
+                .wrap(Wrap { trim: false });
             frame.render_widget(p, area);
         }
 
         ModalState::ProfileSwitcher { selected } => {
-            let area = centered_rect(50, 40, screen_size);
+            let area = centered_rect_clamped(54, 48, 45, 12, screen_size);
             frame.render_widget(Clear, area);
 
             let profiles = app.config_store.profile_names();
@@ -597,64 +923,128 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
                     let is_active = name == &app.active_profile_name;
                     let is_cursor = i == *selected;
 
+                    let host_info = app
+                        .config_store
+                        .get_profile(Some(name))
+                        .map(|c| format!(" ({}://{}:{})", c.protocol, c.host, c.port))
+                        .unwrap_or_default();
+
                     let prefix = if is_cursor { " ▶ " } else { "   " };
-                    let active_tag = if is_active { " [ACTIVE]" } else { "" };
+                    let active_tag = if is_active { "  ● ACTIVE" } else { "" };
 
                     let style = if is_cursor {
-                        Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 50, 70)).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(theme::BG_SELECTED)
+                            .add_modifier(Modifier::BOLD)
                     } else if is_active {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(theme::SUCCESS)
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(theme::TEXT_PRIMARY)
                     };
 
-                    ListItem::new(format!("{}{}{}", prefix, name, active_tag)).style(style)
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{}{}", prefix, name), style),
+                        Span::styled(host_info, Style::default().fg(theme::TEXT_MUTED)),
+                        Span::styled(
+                            active_tag,
+                            Style::default()
+                                .fg(theme::SUCCESS)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]))
                 })
                 .collect();
 
             let block = Block::default()
-                .title(" SWITCH PROFILE (↑/↓ to select, [Enter] apply, [Esc] cancel) ")
+                .title(" SWITCH PROFILE  [Enter] Apply  [Esc] Cancel ")
+                .title_style(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .border_style(Style::default().fg(Color::Cyan));
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::BORDER_ACTIVE))
+                .padding(Padding::uniform(1));
 
-            let list = List::new(items).block(block);
-            frame.render_widget(list, area);
+            frame.render_widget(List::new(items).block(block), area);
         }
 
         ModalState::PasswordPrompt { buffer } => {
-            let area = centered_rect(50, 20, screen_size);
+            let area = centered_rect_clamped(50, 44, 24, 9, screen_size);
             frame.render_widget(Clear, area);
 
-            let masked: String = "*".repeat(buffer.len());
+            let masked: String = "•".repeat(buffer.len());
             let text = vec![
-                Line::from("Enter SSH / SFTP Password:"),
+                Line::from(Span::styled(
+                    "Enter SSH / SFTP Password:",
+                    Style::default().fg(theme::TEXT_PRIMARY),
+                )),
                 Line::from(""),
-                Line::from(Span::styled(format!("> {}_", masked), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    format!("  {}▏ ", masked),
+                    Style::default()
+                        .fg(theme::ACCENT_WARM)
+                        .bg(theme::BG_TAB_ACTIVE)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("[Enter] Confirm   [Esc] Cancel", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "[Enter] Confirm   [Esc] Cancel",
+                    Style::default().fg(theme::TEXT_MUTED),
+                )),
             ];
 
             let block = Block::default()
                 .title(" AUTHENTICATION REQUIRED ")
+                .title_style(
+                    Style::default()
+                        .fg(theme::ERROR)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .border_style(Style::default().fg(Color::Red));
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::ERROR))
+                .padding(Padding::uniform(1));
 
-            let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+            let p = Paragraph::new(text)
+                .block(block)
+                .alignment(Alignment::Center);
             frame.render_widget(p, area);
         }
 
-        ModalState::ChmodPrompt { target, name, buffer } => {
-            let area = centered_rect(50, 25, screen_size);
+        ModalState::ChmodPrompt {
+            target,
+            name,
+            buffer,
+        } => {
+            let area = centered_rect_clamped(50, 44, 26, 9, screen_size);
             frame.render_widget(Clear, area);
 
             let text = vec![
-                Line::from(format!("Set octal permissions (chmod) for '{}':", name)),
+                Line::from(vec![
+                    Span::styled("Octal mode for ", Style::default().fg(theme::TEXT_PRIMARY)),
+                    Span::styled(
+                        name.as_str(),
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
                 Line::from(""),
-                Line::from(Span::styled(format!("> {}_", buffer), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    format!("  {}▏ ", buffer),
+                    Style::default()
+                        .fg(theme::ACCENT_WARM)
+                        .bg(theme::BG_TAB_ACTIVE)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("[Enter] Apply   [Esc] Cancel", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "[Enter] Apply   [Esc] Cancel",
+                    Style::default().fg(theme::TEXT_MUTED),
+                )),
             ];
 
             let title = match target {
@@ -664,34 +1054,42 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
 
             let block = Block::default()
                 .title(title)
+                .title_style(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .border_style(Style::default().fg(Color::Cyan));
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::BORDER_ACTIVE))
+                .padding(Padding::uniform(1));
 
-            let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+            let p = Paragraph::new(text)
+                .block(block)
+                .alignment(Alignment::Center);
             frame.render_widget(p, area);
         }
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
+fn centered_rect_clamped(
+    percent_x: u16,
+    min_w: u16,
+    percent_y: u16,
+    min_h: u16,
+    r: Rect,
+) -> Rect {
+    let width = ((r.width as u32 * percent_x as u32) / 100)
+        .max(min_w as u32)
+        .min(r.width as u32) as u16;
+    let height = ((r.height as u32 * percent_y as u32) / 100)
+        .max(min_h as u32)
+        .min(r.height as u32) as u16;
 
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+    let x = r.x + r.width.saturating_sub(width) / 2;
+    let y = r.y + r.height.saturating_sub(height) / 2;
+
+    Rect::new(x, y, width, height)
 }
 
 fn format_size(bytes: u64) -> String {
