@@ -55,12 +55,13 @@ pub struct TransferJob {
     pub completed_at: Option<Instant>,
 }
 
+const MAX_COMPLETED_JOBS: usize = 500;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum ConveyerEvent {
     JobAdded(TransferJob),
     JobStarted(usize),
-    JobProgress { id: usize, transferred: u64, speed: f64 },
     JobCompleted { id: usize, result: Result<u64, String> },
     Log(String),
 }
@@ -239,6 +240,21 @@ impl Conveyer {
 
         {
             let mut list = self.jobs.write();
+            let completed_count = list
+                .iter()
+                .filter(|j| matches!(j.status, JobStatus::Success | JobStatus::Failed(_)))
+                .count();
+            if completed_count >= MAX_COMPLETED_JOBS {
+                let mut to_drop = completed_count - MAX_COMPLETED_JOBS + 1;
+                list.retain(|j| {
+                    if to_drop > 0 && matches!(j.status, JobStatus::Success | JobStatus::Failed(_)) {
+                        to_drop -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
             list.push(job.clone());
         }
 
@@ -254,5 +270,94 @@ impl Conveyer {
     pub fn clear_completed(&self) {
         let mut list = self.jobs.write();
         list.retain(|j| matches!(j.status, JobStatus::Pending | JobStatus::Running | JobStatus::Retrying(_)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::AtomicU32;
+    use std::time::Duration;
+    use async_trait::async_trait;
+    use crate::transfer::fs_provider::FileStat;
+
+    struct FlakyRemoteFs {
+        attempts: AtomicU32,
+        fail_times: u32,
+    }
+
+    #[async_trait]
+    impl RemoteFs for FlakyRemoteFs {
+        async fn stat(&self, _: &str) -> Result<FileStat> {
+            anyhow::bail!("unused")
+        }
+        async fn read_dir(&self, _: &str) -> Result<Vec<FileStat>> {
+            Ok(vec![])
+        }
+        async fn upload(&self, _: &Path, _: &str, _: bool) -> Result<u64> {
+            let prev = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if prev < self.fail_times {
+                anyhow::bail!("transient failure {}", prev + 1);
+            }
+            Ok(42)
+        }
+        async fn download(&self, _: &str, _: &Path) -> Result<u64> {
+            Ok(0)
+        }
+        async fn remove_file(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dir(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn mkdir_all(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn chmod(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_conveyer_retries_and_clears_completed() {
+        let fs = Arc::new(FlakyRemoteFs {
+            attempts: AtomicU32::new(0),
+            fail_times: 1,
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let conveyer = Conveyer::new(fs, 2, tx);
+
+        let id = conveyer.enqueue(
+            TransferKind::Upload,
+            Some(PathBuf::from("Cargo.toml")),
+            "/remote/Cargo.toml".to_string(),
+            false,
+        );
+
+        let mut completed_ok = false;
+        while let Some(evt) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("conveyer timed out")
+        {
+            if let ConveyerEvent::JobCompleted { id: eid, result } = evt {
+                assert_eq!(eid, id);
+                assert_eq!(result.unwrap(), 42);
+                completed_ok = true;
+                break;
+            }
+        }
+        assert!(completed_ok);
+
+        let jobs = conveyer.get_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, JobStatus::Success);
+        assert_eq!(jobs[0].retry_count, 1);
+
+        conveyer.clear_completed();
+        assert!(conveyer.get_jobs().is_empty());
     }
 }

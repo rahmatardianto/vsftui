@@ -38,9 +38,24 @@ pub trait RemoteFs: Send + Sync {
     async fn disconnect(&self) -> Result<()>;
 }
 
-// -----------------------------------------------------------------------------
-// SFTP Implementation via dedicated worker thread
-// -----------------------------------------------------------------------------
+fn write_all_nonblocking<W: Write>(writer: &mut W, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match writer.write(buf) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            Ok(n) => buf = &buf[n..],
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 
 #[allow(dead_code)]
 enum SftpCommand {
@@ -287,7 +302,7 @@ impl SftpBackend {
                         let mut idle = true;
                         match socket.read(&mut s2c) {
                             Ok(n) if n > 0 => {
-                                if channel.write_all(&s2c[..n]).is_err() {
+                                if write_all_nonblocking(&mut channel, &s2c[..n]).is_err() {
                                     break;
                                 }
                                 idle = false;
@@ -297,7 +312,7 @@ impl SftpBackend {
                         }
                         match channel.read(&mut c2s) {
                             Ok(n) if n > 0 => {
-                                if socket.write_all(&c2s[..n]).is_err() {
+                                if write_all_nonblocking(&mut socket, &c2s[..n]).is_err() {
                                     break;
                                 }
                                 idle = false;
@@ -448,13 +463,7 @@ impl SftpWorker {
             });
         }
 
-        results.sort_by(|a, b| {
-            if a.is_dir != b.is_dir {
-                b.is_dir.cmp(&a.is_dir)
-            } else {
-                a.name.to_lowercase().cmp(&b.name.to_lowercase())
-            }
-        });
+        sort_file_stats(&mut results);
 
         Ok(results)
     }
@@ -462,8 +471,6 @@ impl SftpWorker {
     fn upload(&mut self, local_path: &Path, remote_path: &str, use_temp_file: bool) -> Result<u64> {
         let mut local_file = File::open(local_path)
             .with_context(|| format!("Failed to open local file: {}", local_path.display()))?;
-        let metadata = local_file.metadata()?;
-        let total_size = metadata.len();
 
         let parent_remote = Path::new(remote_path).parent();
         if let Some(parent) = parent_remote {
@@ -517,7 +524,7 @@ impl SftpWorker {
             let _ = self.chmod(remote_path, perm);
         }
 
-        Ok(written_total.max(total_size))
+        Ok(written_total)
     }
 
     fn download(&mut self, remote_path: &str, local_path: &Path) -> Result<u64> {
@@ -530,22 +537,29 @@ impl SftpWorker {
             .open(Path::new(remote_path))
             .with_context(|| format!("Failed to open remote file: {}", remote_path))?;
 
-        let temp_local = local_path.with_extension("downloading.part");
+        let temp_local = temp_download_path(local_path);
         let mut local_file = File::create(&temp_local)?;
 
         let mut buffer = [0u8; 32 * 1024];
         let mut total_bytes: u64 = 0;
 
-        loop {
-            let bytes_read = remote_file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
+        let copy_res: Result<()> = (|| {
+            loop {
+                let bytes_read = remote_file.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                local_file.write_all(&buffer[..bytes_read])?;
+                total_bytes += bytes_read as u64;
             }
-            local_file.write_all(&buffer[..bytes_read])?;
-            total_bytes += bytes_read as u64;
-        }
+            Ok(())
+        })();
 
         drop(local_file);
+        if let Err(e) = copy_res {
+            let _ = std::fs::remove_file(&temp_local);
+            return Err(e);
+        }
         std::fs::rename(&temp_local, local_path)?;
         Ok(total_bytes)
     }
@@ -723,9 +737,21 @@ impl RemoteFs for SftpBackend {
     }
 }
 
-// -----------------------------------------------------------------------------
-// FTP Implementation via AsyncFtpStream
-// -----------------------------------------------------------------------------
+fn temp_download_path(local_path: &Path) -> PathBuf {
+    let mut os = local_path.as_os_str().to_os_string();
+    os.push(".downloading.part");
+    PathBuf::from(os)
+}
+
+fn sort_file_stats(results: &mut [FileStat]) {
+    results.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir)
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+}
 
 pub struct FtpBackend {
     stream: Mutex<AsyncFtpStream>,
@@ -772,30 +798,36 @@ impl RemoteFs for FtpBackend {
     }
 
     async fn read_dir(&self, remote_path: &str) -> Result<Vec<FileStat>> {
+        use std::str::FromStr;
         let mut ftp = self.stream.lock().await;
         let list = ftp
-            .nlst(Some(remote_path))
+            .list(Some(remote_path))
             .await
             .with_context(|| format!("Failed to list FTP dir {}", remote_path))?;
 
         let mut results = Vec::new();
-        for item in list {
-            let name = Path::new(&item)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| item.clone());
-            if name == "." || name == ".." {
-                continue;
+        for line in list {
+            if let Ok(parsed) = suppaftp::list::File::from_str(&line) {
+                let name = parsed.name().to_string();
+                if name == "." || name == ".." || name.is_empty() {
+                    continue;
+                }
+                let path = format!(
+                    "{}/{}",
+                    remote_path.trim_end_matches('/'),
+                    name.trim_start_matches('/')
+                );
+                results.push(FileStat {
+                    name,
+                    path,
+                    is_dir: parsed.is_directory(),
+                    size: parsed.size() as u64,
+                    modified: Some(DateTime::<Utc>::from(parsed.modified())),
+                    permissions: None,
+                });
             }
-            results.push(FileStat {
-                name,
-                path: format!("{}/{}", remote_path.trim_end_matches('/'), item.trim_start_matches('/')),
-                is_dir: false,
-                size: 0,
-                modified: None,
-                permissions: None,
-            });
         }
+        sort_file_stats(&mut results);
         Ok(results)
     }
 
@@ -811,10 +843,25 @@ impl RemoteFs for FtpBackend {
         if let Some(parent) = local_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let temp_local = temp_download_path(local_path);
         let mut stream = ftp.retr_as_stream(remote_path).await?;
-        let mut local_file = tokio::fs::File::create(local_path).await?;
-        let bytes = tokio::io::copy(&mut stream, &mut local_file).await?;
-        stream.finish().await?;
+        let mut local_file = tokio::fs::File::create(&temp_local).await?;
+        let copy_res = tokio::io::copy(&mut stream, &mut local_file).await;
+        let finish_res = stream.finish().await;
+        drop(local_file);
+
+        let bytes = match (copy_res, finish_res) {
+            (Ok(b), Ok(())) => b,
+            (Err(e), _) => {
+                let _ = tokio::fs::remove_file(&temp_local).await;
+                return Err(e.into());
+            }
+            (Ok(_), Err(e)) => {
+                let _ = tokio::fs::remove_file(&temp_local).await;
+                return Err(e.into());
+            }
+        };
+        tokio::fs::rename(&temp_local, local_path).await?;
         Ok(bytes)
     }
 

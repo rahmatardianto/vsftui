@@ -82,7 +82,6 @@ pub enum ModalState {
 pub enum AppAction {
     ConnectProfile(String),
     LoadRemoteDir(String),
-    LoadLocalDir(PathBuf),
     RefreshGitStatus,
     EnqueueUpload { local: PathBuf, remote: String, use_temp: bool },
     EnqueueDownload { remote: String, local: PathBuf },
@@ -649,8 +648,27 @@ impl App {
             return;
         }
         if let Some(entry) = self.remote_entries.get(self.remote_cursor) {
-            let rel = entry.path.trim_start_matches(&self.active_config.remote_path);
-            let local_path = self.workspace_root.join(rel.trim_start_matches('/'));
+            if entry.name == "." || entry.name == ".." || entry.name.contains('/') || entry.name.contains('\\') {
+                self.add_log("ERROR", format!("Refusing unsafe remote name: '{}'", entry.name));
+                return;
+            }
+            let base = self.active_config.remote_path.trim_end_matches('/');
+            let rel = if !base.is_empty() && entry.path.starts_with(base) {
+                let rest = &entry.path[base.len()..];
+                if rest.is_empty() || rest.starts_with('/') {
+                    rest.trim_start_matches('/')
+                } else {
+                    entry.name.as_str()
+                }
+            } else {
+                entry.name.as_str()
+            };
+            let rel_path = Path::new(rel);
+            if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+                self.add_log("ERROR", format!("Refusing unsafe remote path: '{}'", entry.path));
+                return;
+            }
+            let local_path = self.workspace_root.join(rel_path);
 
             if entry.is_dir {
                 let name = entry.name.clone();
@@ -718,9 +736,19 @@ impl App {
 
     pub fn switch_profile(&mut self, name: String) {
         if let Some(cfg) = self.config_store.get_profile(Some(&name)) {
+            if let Some(old_fs) = self.remote_fs.take() {
+                tokio::spawn(async move {
+                    let _ = old_fs.disconnect().await;
+                });
+            }
+            self.conveyer = None;
+            self.remote_entries.clear();
+            self.remote_cursor = 0;
+
             self.active_profile_name = name.clone();
             self.active_config = cfg.clone();
             self.remote_current_dir = cfg.remote_path.clone();
+            self.refresh_local_files();
             self.add_log("INFO", format!("Switched to profile '{}'", name));
 
             let _ = self.action_tx.send(AppAction::ConnectProfile(name));

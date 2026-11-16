@@ -257,7 +257,13 @@ impl SftpConfig {
                 add_glob_and_dir(&mut builder, p);
             }
         }
-        self.ignore_glob_set = builder.build().ok();
+        match builder.build() {
+            Ok(set) => self.ignore_glob_set = Some(set),
+            Err(e) => {
+                tracing::warn!("Failed to build ignore glob set: {}", e);
+                self.ignore_glob_set = None;
+            }
+        }
 
         Ok(())
     }
@@ -709,8 +715,14 @@ where
 }
 
 fn add_glob_and_dir(builder: &mut GlobSetBuilder, pat: &str) {
-    if let Ok(glob) = Glob::new(pat) {
-        builder.add(glob);
+    match Glob::new(pat) {
+        Ok(glob) => {
+            builder.add(glob);
+        }
+        Err(e) => {
+            tracing::warn!("Ignoring invalid ignore glob '{}': {}", pat, e);
+            return;
+        }
     }
     if !pat.ends_with('*') {
         let dir_pat = format!("{}/**", pat.trim_end_matches('/'));

@@ -131,6 +131,9 @@ impl GitInspector {
                     badge = Some(GitBadge::Deleted);
                     op = FileOpKind::Delete;
                     is_staged = false;
+                } else {
+                    // File was deleted from working tree; do not emit an Upload from index status.
+                    badge = None;
                 }
             } else if status.contains(Status::WT_RENAMED) {
                 if git_settings.include_modified {

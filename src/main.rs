@@ -435,6 +435,15 @@ async fn run_headless_watch_git(
 // Interactive TUI Application
 // -----------------------------------------------------------------------------
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+    }
+}
+
 async fn run_tui_app(
     workspace_root: PathBuf,
     config_store: ConfigStore,
@@ -444,6 +453,7 @@ async fn run_tui_app(
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let _terminal_guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -539,7 +549,6 @@ async fn run_tui_app(
                             app.queue_jobs = c.get_jobs();
                         }
                     }
-                    ConveyerEvent::JobProgress { .. } => {}
                     ConveyerEvent::JobCompleted { id, result } => {
                         match result {
                             Ok(bytes) => {
@@ -591,8 +600,7 @@ async fn run_tui_app(
     }
 
     // Cleanup terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    drop(_terminal_guard);
     terminal.show_cursor()?;
 
     Ok(())
@@ -643,11 +651,6 @@ fn handle_app_action(
                     let _ = ui_tx.send(UiUpdate::RemoteDirLoaded { path, result });
                 });
             }
-        }
-
-        AppAction::LoadLocalDir(p) => {
-            // Internal sync notification
-            let _ = p;
         }
 
         AppAction::RefreshGitStatus => {
@@ -876,7 +879,12 @@ async fn collect_remote_files(
             .await
             .map_err(|_| anyhow!("Remote directory listing timed out for {}", r_dir))??;
         for entry in entries {
-            if entry.name == "." || entry.name == ".." {
+            if entry.name == "."
+                || entry.name == ".."
+                || entry.name.is_empty()
+                || entry.name.contains('/')
+                || entry.name.contains('\\')
+            {
                 continue;
             }
             let next_local = l_dir.join(&entry.name);
@@ -943,11 +951,10 @@ async fn compute_local_to_remote_sync(
     let needs_filter = sync_opt.is_some_and(|s| s.skip_create || s.ignore_existing || s.update);
     let needs_delete = sync_opt.is_some_and(|s| s.delete);
 
-    if (needs_filter || needs_delete) && fs.is_some() {
-        let fs = fs.unwrap();
-        let remote_entries = collect_remote_files(fs, remote_dir, local_dir)
-            .await
-            .unwrap_or_default();
+    if let Some(fs) = fs
+        && (needs_filter || needs_delete)
+    {
+        let remote_entries = collect_remote_files(fs, remote_dir, local_dir).await?;
 
         let deletes = if needs_delete {
             compute_extra_remote_deletes_from_entries(
