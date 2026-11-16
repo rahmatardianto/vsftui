@@ -471,6 +471,12 @@ impl SftpWorker {
     fn upload(&mut self, local_path: &Path, remote_path: &str, use_temp_file: bool) -> Result<u64> {
         let mut local_file = File::open(local_path)
             .with_context(|| format!("Failed to open local file: {}", local_path.display()))?;
+        let local_mtime = local_file
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
 
         let parent_remote = Path::new(remote_path).parent();
         if let Some(parent) = parent_remote {
@@ -520,8 +526,16 @@ impl SftpWorker {
             }
         }
 
-        if let Some(perm) = self.file_perm {
-            let _ = self.chmod(remote_path, perm);
+        if self.file_perm.is_some() || local_mtime.is_some() {
+            let stat = ssh2::FileStat {
+                size: None,
+                uid: None,
+                gid: None,
+                perm: self.file_perm,
+                atime: local_mtime,
+                mtime: local_mtime,
+            };
+            let _ = self.sftp.setstat(Path::new(remote_path), stat);
         }
 
         Ok(written_total)
@@ -536,6 +550,11 @@ impl SftpWorker {
             .sftp
             .open(Path::new(remote_path))
             .with_context(|| format!("Failed to open remote file: {}", remote_path))?;
+        let remote_mtime = remote_file
+            .stat()
+            .ok()
+            .and_then(|s| s.mtime)
+            .or_else(|| self.sftp.stat(Path::new(remote_path)).ok().and_then(|s| s.mtime));
 
         let temp_local = temp_download_path(local_path);
         let mut local_file = File::create(&temp_local)?;
@@ -552,8 +571,15 @@ impl SftpWorker {
                 local_file.write_all(&buffer[..bytes_read])?;
                 total_bytes += bytes_read as u64;
             }
+            local_file.flush()?;
             Ok(())
         })();
+
+        if copy_res.is_ok()
+            && let Some(mtime) = remote_mtime
+        {
+            let _ = local_file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime));
+        }
 
         drop(local_file);
         if let Err(e) = copy_res {

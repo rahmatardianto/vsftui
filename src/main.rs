@@ -562,6 +562,7 @@ async fn run_tui_app(
                             app.queue_jobs = c.get_jobs();
                         }
                         // Refresh views after completion
+                        app.refresh_local_files();
                         let _ = action_tx.send(AppAction::RefreshGitStatus);
                         let target_remote = app.remote_current_dir.clone();
                         let _ = action_tx.send(AppAction::LoadRemoteDir(target_remote));
