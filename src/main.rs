@@ -252,30 +252,22 @@ async fn run_headless_sync_local_to_remote(
     println!("Workspace : {}", workspace_root.display());
     println!("Target    : {}@{}:{}", config.username, config.host, config.remote_path);
 
-    let mut items = Vec::new();
-    collect_local_files(workspace_root, workspace_root, &config.remote_path, &config, &mut items)?;
-
     println!("Connecting to remote...");
     let remote_fs = create_remote_fs(config.clone()).await?;
     println!("✔ Connected successfully.");
 
-    let deletes = if config.sync_option.as_ref().is_some_and(|s| s.delete) {
-        compute_extra_remote_deletes(
-            Arc::clone(&remote_fs),
-            workspace_root,
-            config.remote_path.clone(),
-            workspace_root.to_path_buf(),
-            &config,
-            &items,
-        )
-        .await
-    } else {
-        Vec::new()
-    };
+    let (items, deletes) = compute_local_to_remote_sync(
+        Some(Arc::clone(&remote_fs)),
+        workspace_root.to_path_buf(),
+        workspace_root.to_path_buf(),
+        config.remote_path.clone(),
+        config.clone(),
+    )
+    .await?;
 
     let queued_count = items.len() + deletes.len();
     if queued_count == 0 {
-        println!("✔ Nothing to sync.");
+        println!("✔ Nothing to sync (all files up-to-date).");
         return Ok(());
     }
 
@@ -724,43 +716,8 @@ fn handle_app_action(
             let cfg = app.active_config.clone();
             let fs_opt = app.remote_fs.clone();
             let label = local_dir.display().to_string();
-            let delete_extra = cfg.sync_option.as_ref().is_some_and(|s| s.delete);
-            let remote_dir_scan = remote_dir.clone();
-            let local_dir_scan = local_dir.clone();
-            let ws_scan = ws.clone();
-            let cfg_scan = cfg.clone();
             tokio::spawn(async move {
-                let res = tokio::task::spawn_blocking(move || {
-                    let mut items = Vec::new();
-                    collect_local_files(&ws_scan, &local_dir, &remote_dir, &cfg_scan, &mut items)?;
-                    Ok::<_, anyhow::Error>(items)
-                })
-                .await
-                .unwrap_or_else(|e| Err(anyhow!("Local folder scan failed: {}", e)));
-
-                let result = match res {
-                    Ok(items) => {
-                        let deletes = if delete_extra {
-                            if let Some(fs) = fs_opt {
-                                compute_extra_remote_deletes(
-                                    fs,
-                                    &ws,
-                                    remote_dir_scan,
-                                    local_dir_scan,
-                                    &cfg,
-                                    &items,
-                                )
-                                .await
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        };
-                        Ok((items, deletes))
-                    }
-                    Err(e) => Err(e),
-                };
+                let result = compute_local_to_remote_sync(fs_opt, ws, local_dir, remote_dir, cfg).await;
                 let _ = ui_tx.send(UiUpdate::BatchUploadsReady { label, result });
             });
         }
@@ -854,11 +811,64 @@ fn collect_local_files(
     Ok(())
 }
 
+#[derive(Clone)]
+struct RemoteFileEntry {
+    remote_path: String,
+    local_path: PathBuf,
+    size: u64,
+    modified_secs: Option<i64>,
+}
+
+fn local_file_meta(path: &Path) -> (bool, Option<i64>, Option<u64>) {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            (true, mtime, Some(meta.len()))
+        }
+        Err(_) => (false, None, None),
+    }
+}
+
+/// Evaluates whether a file should be transferred according to `syncOption` flags
+/// (`skipCreate`, `ignoreExisting`, `update`).
+fn should_sync_file(
+    target_exists: bool,
+    src_mtime_secs: Option<i64>,
+    dst_mtime_secs: Option<i64>,
+    src_size: Option<u64>,
+    dst_size: Option<u64>,
+    sync_opt: &config::SyncOption,
+) -> bool {
+    if !target_exists {
+        return !sync_opt.skip_create;
+    }
+    if sync_opt.ignore_existing {
+        return false;
+    }
+    if sync_opt.update {
+        return match (src_mtime_secs, dst_mtime_secs) {
+            (Some(src_t), Some(dst_t)) => {
+                src_t > dst_t
+                    || (src_t == dst_t
+                        && src_size.is_some()
+                        && dst_size.is_some()
+                        && src_size != dst_size)
+            }
+            _ => true,
+        };
+    }
+    true
+}
+
 async fn collect_remote_files(
     fs: Arc<dyn RemoteFs>,
     remote_root: String,
     local_root: PathBuf,
-) -> Result<Vec<(String, PathBuf)>> {
+) -> Result<Vec<RemoteFileEntry>> {
     let mut out = Vec::new();
     let mut stack = vec![(remote_root, local_root)];
     while let Some((r_dir, l_dir)) = stack.pop() {
@@ -873,7 +883,12 @@ async fn collect_remote_files(
             if entry.is_dir {
                 stack.push((entry.path, next_local));
             } else {
-                out.push((entry.path, next_local));
+                out.push(RemoteFileEntry {
+                    remote_path: entry.path,
+                    local_path: next_local,
+                    size: entry.size,
+                    modified_secs: entry.modified.map(|dt| dt.timestamp()),
+                });
             }
         }
     }
@@ -889,28 +904,92 @@ fn is_local_path_ignored(workspace_root: &Path, path: &Path, config: &SftpConfig
     false
 }
 
-async fn compute_extra_remote_deletes(
-    fs: Arc<dyn RemoteFs>,
+fn compute_extra_remote_deletes_from_entries(
     workspace_root: &Path,
-    remote_dir: String,
-    local_dir: PathBuf,
     config: &SftpConfig,
+    remote_entries: &[RemoteFileEntry],
     local_items: &[(PathBuf, String)],
 ) -> Vec<String> {
-    let mut deletes = Vec::new();
-    if let Ok(remote_items) = collect_remote_files(fs, remote_dir, local_dir).await {
-        let local_remotes: std::collections::HashSet<&str> =
-            local_items.iter().map(|(_, r)| r.as_str()).collect();
-        for (r_path, l_path) in remote_items {
-            if is_local_path_ignored(workspace_root, &l_path, config) {
-                continue;
-            }
-            if !local_remotes.contains(r_path.as_str()) {
-                deletes.push(r_path);
-            }
-        }
+    let local_remotes: std::collections::HashSet<&str> =
+        local_items.iter().map(|(_, r)| r.as_str()).collect();
+    remote_entries
+        .iter()
+        .filter(|e| !is_local_path_ignored(workspace_root, &e.local_path, config))
+        .filter(|e| !local_remotes.contains(e.remote_path.as_str()))
+        .map(|e| e.remote_path.clone())
+        .collect()
+}
+
+async fn compute_local_to_remote_sync(
+    fs: Option<Arc<dyn RemoteFs>>,
+    workspace_root: PathBuf,
+    local_dir: PathBuf,
+    remote_dir: String,
+    config: SftpConfig,
+) -> Result<(Vec<(PathBuf, String)>, Vec<String>)> {
+    let ws_scan = workspace_root.clone();
+    let local_dir_scan = local_dir.clone();
+    let remote_dir_scan = remote_dir.clone();
+    let cfg_scan = config.clone();
+    let all_local_items = tokio::task::spawn_blocking(move || {
+        let mut items = Vec::new();
+        collect_local_files(&ws_scan, &local_dir_scan, &remote_dir_scan, &cfg_scan, &mut items)?;
+        Ok::<_, anyhow::Error>(items)
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow!("Local folder scan failed: {}", e)))?;
+
+    let sync_opt = config.sync_option.as_ref();
+    let needs_filter = sync_opt.is_some_and(|s| s.skip_create || s.ignore_existing || s.update);
+    let needs_delete = sync_opt.is_some_and(|s| s.delete);
+
+    if (needs_filter || needs_delete) && fs.is_some() {
+        let fs = fs.unwrap();
+        let remote_entries = collect_remote_files(fs, remote_dir, local_dir)
+            .await
+            .unwrap_or_default();
+
+        let deletes = if needs_delete {
+            compute_extra_remote_deletes_from_entries(
+                &workspace_root,
+                &config,
+                &remote_entries,
+                &all_local_items,
+            )
+        } else {
+            Vec::new()
+        };
+
+        let items = if let (true, Some(opt)) = (needs_filter, sync_opt) {
+            let remote_map: std::collections::HashMap<&str, &RemoteFileEntry> = remote_entries
+                .iter()
+                .map(|e| (e.remote_path.as_str(), e))
+                .collect();
+            all_local_items
+                .into_iter()
+                .filter(|(local_path, remote_path)| {
+                    let (_, src_mtime, src_size) = local_file_meta(local_path);
+                    match remote_map.get(remote_path.as_str()) {
+                        Some(r) => should_sync_file(
+                            true,
+                            src_mtime,
+                            r.modified_secs,
+                            src_size,
+                            Some(r.size),
+                            opt,
+                        ),
+                        None => should_sync_file(false, src_mtime, None, src_size, None, opt),
+                    }
+                })
+                .collect()
+        } else {
+            all_local_items
+        };
+
+        Ok((items, deletes))
+    } else {
+        Ok((all_local_items, Vec::new()))
     }
-    deletes
 }
 
 fn compute_extra_local_deletes(
@@ -940,14 +1019,18 @@ async fn compute_remote_to_local_sync(
     local_dir: PathBuf,
     config: SftpConfig,
 ) -> Result<(Vec<(String, PathBuf)>, Vec<PathBuf>)> {
-    let raw_items = collect_remote_files(fs, remote_dir.clone(), local_dir.clone()).await?;
-    let items: Vec<(String, PathBuf)> = raw_items
+    let raw_entries = collect_remote_files(fs, remote_dir.clone(), local_dir.clone()).await?;
+    let valid_entries: Vec<RemoteFileEntry> = raw_entries
         .into_iter()
-        .filter(|(_, l_path)| !is_local_path_ignored(&workspace_root, l_path, &config))
+        .filter(|e| !is_local_path_ignored(&workspace_root, &e.local_path, &config))
         .collect();
 
-    let deletes = if config.sync_option.as_ref().is_some_and(|s| s.delete) {
-        let items_for_scan = items.clone();
+    let sync_opt = config.sync_option.clone();
+    let deletes = if sync_opt.as_ref().is_some_and(|s| s.delete) {
+        let items_for_scan: Vec<(String, PathBuf)> = valid_entries
+            .iter()
+            .map(|e| (e.remote_path.clone(), e.local_path.clone()))
+            .collect();
         tokio::task::spawn_blocking(move || {
             compute_extra_local_deletes(&workspace_root, &local_dir, &remote_dir, &config, &items_for_scan)
         })
@@ -955,6 +1038,29 @@ async fn compute_remote_to_local_sync(
         .unwrap_or_else(|e| Err(anyhow!("Local cleanup scan failed: {}", e)))?
     } else {
         Vec::new()
+    };
+
+    let items: Vec<(String, PathBuf)> = if let Some(opt) = sync_opt.as_ref().filter(|s| s.skip_create || s.ignore_existing || s.update) {
+        valid_entries
+            .into_iter()
+            .filter(|e| {
+                let (dst_exists, dst_mtime, dst_size) = local_file_meta(&e.local_path);
+                should_sync_file(
+                    dst_exists,
+                    e.modified_secs,
+                    dst_mtime,
+                    Some(e.size),
+                    dst_size,
+                    opt,
+                )
+            })
+            .map(|e| (e.remote_path, e.local_path))
+            .collect()
+    } else {
+        valid_entries
+            .into_iter()
+            .map(|e| (e.remote_path, e.local_path))
+            .collect()
     };
 
     Ok((items, deletes))
@@ -1171,5 +1277,155 @@ mod tests {
         let deletes = compute_extra_local_deletes(root, root, "/r", &cfg, &remote_items).unwrap();
 
         assert_eq!(deletes, vec![root.join("stale.txt")]);
+    }
+
+    #[test]
+    fn test_should_sync_file_options() {
+        let update_opt = config::SyncOption {
+            update: true,
+            ..Default::default()
+        };
+        assert!(should_sync_file(false, Some(100), None, Some(5), None, &update_opt));
+        assert!(!should_sync_file(true, Some(100), Some(100), Some(5), Some(5), &update_opt));
+        assert!(!should_sync_file(true, Some(90), Some(100), Some(5), Some(5), &update_opt));
+        assert!(should_sync_file(true, Some(101), Some(100), Some(5), Some(5), &update_opt));
+        assert!(should_sync_file(true, Some(100), Some(100), Some(6), Some(5), &update_opt));
+        assert!(should_sync_file(true, Some(100), None, Some(5), Some(5), &update_opt));
+
+        let ignore_existing = config::SyncOption {
+            ignore_existing: true,
+            ..Default::default()
+        };
+        assert!(should_sync_file(false, Some(100), None, Some(5), None, &ignore_existing));
+        assert!(!should_sync_file(true, Some(200), Some(100), Some(5), Some(5), &ignore_existing));
+
+        let skip_create = config::SyncOption {
+            skip_create: true,
+            ..Default::default()
+        };
+        assert!(!should_sync_file(false, Some(100), None, Some(5), None, &skip_create));
+        assert!(should_sync_file(true, Some(100), Some(100), Some(5), Some(5), &skip_create));
+    }
+
+    struct MockRemoteFs {
+        entries: std::collections::HashMap<String, Vec<transfer::fs_provider::FileStat>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteFs for MockRemoteFs {
+        async fn stat(&self, _: &str) -> Result<transfer::fs_provider::FileStat> {
+            anyhow::bail!("unused")
+        }
+        async fn read_dir(&self, remote_path: &str) -> Result<Vec<transfer::fs_provider::FileStat>> {
+            Ok(self.entries.get(remote_path).cloned().unwrap_or_default())
+        }
+        async fn upload(&self, _: &Path, _: &str, _: bool) -> Result<u64> {
+            Ok(0)
+        }
+        async fn download(&self, _: &str, _: &Path) -> Result<u64> {
+            Ok(0)
+        }
+        async fn remove_file(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dir(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn mkdir_all(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn chmod(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sync_update_skips_unchanged_and_preserves_delete_check() {
+        use chrono::{TimeZone, Utc};
+        use transfer::fs_provider::FileStat;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("same.txt"), "same").unwrap();
+        std::fs::write(root.join("newer.txt"), "newer-content").unwrap();
+        std::fs::write(root.join("new_local.txt"), "new").unwrap();
+
+        let same_mtime = local_file_meta(&root.join("same.txt")).1.unwrap();
+        let older_remote_mtime = same_mtime - 60;
+
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            "/r".to_string(),
+            vec![
+                FileStat {
+                    name: "same.txt".to_string(),
+                    path: "/r/same.txt".to_string(),
+                    is_dir: false,
+                    size: 4,
+                    modified: Utc.timestamp_opt(same_mtime, 0).single(),
+                    permissions: None,
+                },
+                FileStat {
+                    name: "newer.txt".to_string(),
+                    path: "/r/newer.txt".to_string(),
+                    is_dir: false,
+                    size: 13,
+                    modified: Utc.timestamp_opt(older_remote_mtime, 0).single(),
+                    permissions: None,
+                },
+                FileStat {
+                    name: "extra_remote.txt".to_string(),
+                    path: "/r/extra_remote.txt".to_string(),
+                    is_dir: false,
+                    size: 5,
+                    modified: Utc.timestamp_opt(same_mtime, 0).single(),
+                    permissions: None,
+                },
+            ],
+        );
+        let mock_fs: Arc<dyn RemoteFs> = Arc::new(MockRemoteFs { entries });
+
+        let mut cfg: SftpConfig = serde_json::from_str(
+            r#"{"host":"h","username":"u","remotePath":"/r","syncOption":{"update":true,"delete":true}}"#,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+
+        // Local -> Remote: should only upload newer.txt and new_local.txt, and delete extra_remote.txt
+        let (uploads, remote_deletes) = compute_local_to_remote_sync(
+            Some(Arc::clone(&mock_fs)),
+            root.to_path_buf(),
+            root.to_path_buf(),
+            "/r".to_string(),
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
+
+        let upload_names: Vec<&str> = uploads.iter().map(|(_, r)| r.as_str()).collect();
+        assert!(!upload_names.contains(&"/r/same.txt"));
+        assert!(upload_names.contains(&"/r/newer.txt"));
+        assert!(upload_names.contains(&"/r/new_local.txt"));
+        assert_eq!(remote_deletes, vec!["/r/extra_remote.txt".to_string()]);
+
+        // Remote -> Local: same.txt is up-to-date so skipped, but must NOT be deleted locally!
+        let (downloads, local_deletes) = compute_remote_to_local_sync(
+            Arc::clone(&mock_fs),
+            root.to_path_buf(),
+            "/r".to_string(),
+            root.to_path_buf(),
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        let download_names: Vec<&str> = downloads.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(!download_names.contains(&"/r/same.txt"));
+        assert!(!download_names.contains(&"/r/newer.txt"));
+        assert!(download_names.contains(&"/r/extra_remote.txt"));
+        assert_eq!(local_deletes, vec![root.join("new_local.txt")]);
     }
 }
