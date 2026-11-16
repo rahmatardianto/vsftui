@@ -783,6 +783,27 @@ fn handle_app_action(
             });
         }
 
+        AppAction::ChmodLocal { local_path, mode } => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                match std::fs::set_permissions(&local_path, std::fs::Permissions::from_mode(mode)) {
+                    Ok(()) => {
+                        app.add_log("INFO", format!("✔ chmod {:o} {}", mode, local_path.display()));
+                        app.refresh_local_files();
+                    }
+                    Err(e) => {
+                        app.add_log("ERROR", format!("chmod {:o} {} failed: {}", mode, local_path.display(), e));
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (local_path, mode);
+                app.add_log("WARN", "Local chmod is only supported on Unix systems".to_string());
+            }
+        }
+
         AppAction::ChmodRemote { remote_path, mode } => {
             if app.abort_if_conn_error() {
                 return;

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -7,7 +8,7 @@ use ratatui::widgets::{
     TableState, Tabs, Wrap,
 };
 
-use crate::app::{ActivePane, App, BottomTab, ConnectionStatus, LeftTab, ModalState};
+use crate::app::{ActivePane, App, BottomTab, ChmodTarget, ConnectionStatus, LeftTab, ModalState};
 use crate::git_sync::GitBadge;
 use crate::transfer::conveyer::JobStatus;
 
@@ -209,10 +210,11 @@ fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_co
             } else {
                 format_size(entry.size)
             };
-            let mtime_str = entry
-                .modified
-                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            let perm_str = entry
+                .permissions
+                .map(|p| format!("{:o}", p & 0o777))
                 .unwrap_or_else(|| "-".to_string());
+            let mtime_str = format_modified(entry.modified);
 
             let row_style = if is_selected {
                 Style::default().fg(Color::White).bg(Color::Rgb(30, 50, 70)).add_modifier(Modifier::BOLD)
@@ -224,6 +226,7 @@ fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_co
 
             Row::new(vec![
                 format!("{}{}", icon, entry.name),
+                perm_str,
                 size_str,
                 mtime_str,
             ])
@@ -234,13 +237,14 @@ fn draw_local_explorer_table(frame: &mut Frame, app: &App, area: Rect, border_co
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(60),
+            Constraint::Percentage(50),
+            Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Length(18),
         ],
     )
     .header(
-        Row::new(vec!["Name", "Size", "Modified"])
+        Row::new(vec!["Name", "Perm", "Size", "Modified"])
             .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )
@@ -295,10 +299,7 @@ fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
                 .permissions
                 .map(|p| format!("{:o}", p & 0o777))
                 .unwrap_or_else(|| "-".to_string());
-            let mtime_str = entry
-                .modified
-                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "-".to_string());
+            let mtime_str = format_modified(entry.modified);
 
             let row_style = if is_selected {
                 Style::default().fg(Color::White).bg(Color::Rgb(30, 50, 70)).add_modifier(Modifier::BOLD)
@@ -336,6 +337,12 @@ fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut state = TableState::default().with_selected((!app.remote_entries.is_empty()).then_some(app.remote_cursor));
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn format_modified(modified: Option<DateTime<Utc>>) -> String {
+    modified
+        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 // -----------------------------------------------------------------------------
@@ -548,7 +555,7 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
                 Line::from(vec![Span::styled("s         ", Style::default().fg(Color::Cyan)), Span::raw("Batch sync selected local/remote folder")]),
                 Line::from(vec![Span::styled("U         ", Style::default().fg(Color::Cyan)), Span::raw("Sync entire local workspace -> remote")]),
                 Line::from(vec![Span::styled("D         ", Style::default().fg(Color::Cyan)), Span::raw("Sync entire remote -> local workspace")]),
-                Line::from(vec![Span::styled("m         ", Style::default().fg(Color::Cyan)), Span::raw("Change remote permissions (chmod) on selected item")]),
+                Line::from(vec![Span::styled("m         ", Style::default().fg(Color::Cyan)), Span::raw("Change permissions (chmod) on selected local/remote item")]),
                 Line::from(vec![Span::styled("G         ", Style::default().fg(Color::Cyan)), Span::raw("One-shot Batch Upload of all uncommitted Git changes")]),
                 Line::from(vec![Span::styled("p         ", Style::default().fg(Color::Cyan)), Span::raw("Open Profile Switcher (sftp.json profiles)")]),
                 Line::from(vec![Span::styled("r         ", Style::default().fg(Color::Cyan)), Span::raw("Refresh directory listings and Git status")]),
@@ -629,7 +636,7 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
             frame.render_widget(p, area);
         }
 
-        ModalState::ChmodPrompt { name, buffer, .. } => {
+        ModalState::ChmodPrompt { target, name, buffer } => {
             let area = centered_rect(50, 25, screen_size);
             frame.render_widget(Clear, area);
 
@@ -641,8 +648,13 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &ModalState, screen_size: Rec
                 Line::from(Span::styled("[Enter] Apply   [Esc] Cancel", Style::default().fg(Color::DarkGray))),
             ];
 
+            let title = match target {
+                ChmodTarget::Local(_) => " LOCAL PERMISSIONS (CHMOD) ",
+                ChmodTarget::Remote(_) => " REMOTE PERMISSIONS (CHMOD) ",
+            };
+
             let block = Block::default()
-                .title(" REMOTE PERMISSIONS (CHMOD) ")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
                 .border_style(Style::default().fg(Color::Cyan));

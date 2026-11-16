@@ -46,7 +46,20 @@ pub struct LocalFileEntry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub size: u64,
+    pub permissions: Option<u32>,
     pub modified: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChmodTarget {
+    Local(PathBuf),
+    Remote(String),
+}
+
+fn default_perm_string(permissions: Option<u32>, is_dir: bool) -> String {
+    permissions
+        .map(|p| format!("{:o}", p & 0o777))
+        .unwrap_or_else(|| if is_dir { "755".to_string() } else { "644".to_string() })
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +74,7 @@ pub struct LogItem {
 pub enum ModalState {
     ProfileSwitcher { selected: usize },
     PasswordPrompt { buffer: String },
-    ChmodPrompt { remote_path: String, name: String, buffer: String },
+    ChmodPrompt { target: ChmodTarget, name: String, buffer: String },
     Help,
 }
 
@@ -77,6 +90,7 @@ pub enum AppAction {
     SyncAllUncommitted,
     SyncLocalDir { local_dir: PathBuf, remote_dir: String },
     SyncRemoteDir { remote_dir: String, local_dir: PathBuf },
+    ChmodLocal { local_path: PathBuf, mode: u32 },
     ChmodRemote { remote_path: String, mode: u32 },
 }
 
@@ -217,6 +231,13 @@ impl App {
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 let metadata = entry.metadata().ok();
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                #[cfg(unix)]
+                let permissions = {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.as_ref().map(|m| m.permissions().mode())
+                };
+                #[cfg(not(unix))]
+                let permissions = None;
                 let modified = metadata
                     .and_then(|m| m.modified().ok())
                     .map(|sys_time| DateTime::<Utc>::from(sys_time));
@@ -226,6 +247,7 @@ impl App {
                     path,
                     is_dir,
                     size,
+                    permissions,
                     modified,
                 });
             }
@@ -303,23 +325,30 @@ impl App {
                     }
                     return;
                 }
-                ModalState::ChmodPrompt { remote_path, name, mut buffer } => {
+                ModalState::ChmodPrompt { target, name, mut buffer } => {
                     match key.code {
                         KeyCode::Esc => {
                             self.modal = None;
                         }
                         KeyCode::Char(c) if ('0'..='7').contains(&c) && buffer.len() < 4 => {
                             buffer.push(c);
-                            self.modal = Some(ModalState::ChmodPrompt { remote_path, name, buffer });
+                            self.modal = Some(ModalState::ChmodPrompt { target, name, buffer });
                         }
                         KeyCode::Backspace => {
                             buffer.pop();
-                            self.modal = Some(ModalState::ChmodPrompt { remote_path, name, buffer });
+                            self.modal = Some(ModalState::ChmodPrompt { target, name, buffer });
                         }
                         KeyCode::Enter => {
                             if let Ok(mode) = u32::from_str_radix(buffer.trim(), 8) {
                                 self.modal = None;
-                                let _ = self.action_tx.send(AppAction::ChmodRemote { remote_path, mode });
+                                match target {
+                                    ChmodTarget::Local(local_path) => {
+                                        let _ = self.action_tx.send(AppAction::ChmodLocal { local_path, mode });
+                                    }
+                                    ChmodTarget::Remote(remote_path) => {
+                                        let _ = self.action_tx.send(AppAction::ChmodRemote { remote_path, mode });
+                                    }
+                                }
                             } else {
                                 self.add_log("WARN", format!("Invalid octal mode: '{}'", buffer));
                             }
@@ -509,6 +538,16 @@ impl App {
             KeyCode::Char('u') | KeyCode::Char('s') => {
                 self.upload_selected_local();
             }
+            KeyCode::Char('m') => {
+                if let Some(entry) = self.local_entries.get(self.local_cursor) {
+                    let default_perm = default_perm_string(entry.permissions, entry.is_dir);
+                    self.modal = Some(ModalState::ChmodPrompt {
+                        target: ChmodTarget::Local(entry.path.clone()),
+                        name: entry.name.clone(),
+                        buffer: default_perm,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -579,12 +618,9 @@ impl App {
             KeyCode::Char('m') => {
                 if !self.abort_if_conn_error() {
                     if let Some(entry) = self.remote_entries.get(self.remote_cursor) {
-                        let default_perm = entry
-                            .permissions
-                            .map(|p| format!("{:o}", p & 0o777))
-                            .unwrap_or_else(|| if entry.is_dir { "755".to_string() } else { "644".to_string() });
+                        let default_perm = default_perm_string(entry.permissions, entry.is_dir);
                         self.modal = Some(ModalState::ChmodPrompt {
-                            remote_path: entry.path.clone(),
+                            target: ChmodTarget::Remote(entry.path.clone()),
                             name: entry.name.clone(),
                             buffer: default_perm,
                         });
